@@ -706,7 +706,11 @@ defmodule Lua.Compiler.Scope do
         next_register: next_param_reg,
         current_function: func_key,
         parent_scopes: [parent_scope_entry | state.parent_scopes],
-        captured_locals: MapSet.new(),
+        # A function's own `_ENV` (a parameter or `local _ENV`) is treated as
+        # captured from the start, as the chunk's is: a closure created later
+        # in a loop can then never reuse an open cell that a plain register
+        # write to `_ENV` did not update.
+        captured_locals: MapSet.new(["_ENV"]),
         block_path: []
     }
 

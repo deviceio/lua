@@ -116,4 +116,46 @@ defmodule Lua.VM.EnvSemanticsTest do
       assert {[true], _} = Lua.eval!(lua, code)
     end
   end
+
+  describe "a function that rebinds its own _ENV in a loop" do
+    test "a later closure reads the rebound table on every pass (for loop)", %{lua: lua} do
+      code = """
+      local function f(_ENV)
+        local out = {}
+        local k = 0
+        local a = function() return k end
+        for i = 1, 2 do
+          _ENV = {v = i}
+          local g = function() return v end
+          out[i] = g()
+        end
+        return out[1] .. "," .. out[2]
+      end
+      return f({})
+      """
+
+      assert {["1,2"], _} = Lua.eval!(lua, code)
+    end
+
+    test "a later closure reads the rebound table on every pass (goto loop)", %{lua: lua} do
+      code = """
+      local function f(_ENV)
+        local out = {}
+        local k = 0
+        local a = function() return k end
+        local i = 1
+        ::again::
+        _ENV = {v = i}
+        local g = function() return v end
+        out[i] = g()
+        i = i + 1
+        if i <= 2 then goto again end
+        return out[1] .. "," .. out[2]
+      end
+      return f({})
+      """
+
+      assert {["1,2"], _} = Lua.eval!(lua, code)
+    end
+  end
 end
