@@ -57,16 +57,21 @@ is in the [`1.0.0-rc.0`](#100-rc0---2026-05-26) entry below.
   returning. `Lua.eval!/2` and `Lua.call_function/3` then return
   `{:suspended, values, lua}` (values decoded and display-wrapped under
   the `:decode` option, exactly like normal results), with a continuation
-  stored on the `%Lua{}`. The new `Lua.resume/2` / `Lua.resume!/2`
+  stored on the `%Lua{}`. The new `Lua.resume/3` / `Lua.resume!/3`
   re-enter the parked machine; the resume values become the suspended
   call's results inside Lua, and a resumed evaluation may suspend again.
+  Their results, and the values of a further suspend, are decoded under
+  a `:decode` option (default `true`), as `eval!` does.
   Heap effects made before a suspend are kept, as are effects made
   before a post-resume error (matching `pcall` semantics), and a
   `:max_instructions` budget spans the whole suspend/resume cycle. A
-  suspend that cannot be resumed — across a `pcall`/`xpcall` boundary, a
-  metamethod, a `table.sort` comparator, a `string.gsub` replacement
-  function, a generic-for iterator, a `load` reader, or a re-entrant
-  native call — is reported as the catchable Lua error `"attempt to
+  suspend that cannot be resumed — across a `pcall`/`xpcall` boundary, an
+  operator metamethod (`__add` and the other arithmetic and bitwise
+  metamethods, `__unm`, `__concat`, `__len`, `__eq`, `__lt`, `__le`), an
+  `__index`, `__newindex`, `__call` or `__tostring` function, a
+  `table.sort` comparator, a `string.gsub` replacement function, a
+  generic-for iterator, a `load` reader, a `require` loader, or a
+  re-entrant native call — is reported as the catchable Lua error `"attempt to
   suspend across a native call boundary"`. Full `coroutine`
   yield/resume remains a separate non-goal.
 

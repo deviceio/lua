@@ -29,7 +29,7 @@ defmodule Lua do
 
   # `:continuation` holds a `Lua.VM.Continuation.t()` while the VM is parked
   # at a suspend point (a `deflua`/Elixir callback returned `{:suspend,
-  # values}`); it is `nil` during normal execution. Resume with `Lua.resume/2`.
+  # values}`); it is `nil` during normal execution. Resume with `Lua.resume/3`.
   defstruct [:state, :continuation, debug: false]
 
   @default_sandbox [
@@ -508,7 +508,7 @@ defmodule Lua do
   `{:suspend, values}` (or `{:suspend, values, lua}`), evaluation parks
   instead of running to completion: `eval!/2` returns
   `{:suspended, values, lua}` where `lua` carries a continuation. Resume
-  with `Lua.resume/2`; the values you pass become the suspended call's
+  with `Lua.resume/3`; the values you pass become the suspended call's
   results inside Lua.
 
       iex> lua = Lua.new() |> Lua.set!([:yield], fn [v], lua -> {:suspend, [v], lua} end)
@@ -840,7 +840,7 @@ defmodule Lua do
   end
 
   # A suspended call parks the machine: the continuation rides on the
-  # returned `%Lua{}` and `Lua.resume/2` re-enters it.
+  # returned `%Lua{}` and `Lua.resume/3` re-enters it.
   defp finish_call(%__MODULE__{} = lua, {:suspended, values, continuation, new_state}) do
     {:suspended, values, %{lua | state: new_state, continuation: continuation}}
   end
@@ -1049,7 +1049,7 @@ defmodule Lua do
   A `deflua`/Elixir callback suspends execution by returning
   `{:suspend, values}` (or `{:suspend, values, lua}`); `Lua.eval!/2` and
   `Lua.call_function/3` then return `{:suspended, values, lua}` with a
-  continuation stored on the `%Lua{}`. `resume/2` re-enters the parked
+  continuation stored on the `%Lua{}`. `resume/3` re-enters the parked
   machine: `values` are the encoded Lua values that become the suspended
   call's results (the same encoding convention as `call_function/3`
   arguments — plain Elixir values like numbers, strings, and booleans).
@@ -1058,34 +1058,72 @@ defmodule Lua do
       iex> {:suspended, [1], lua} = Lua.eval!(lua, "return yield(1) * 10")
       iex> {:ok, [10], _lua} = Lua.resume(lua, [1])
 
-  A resumed evaluation may suspend again — `resume/2` returns
+  A resumed evaluation may suspend again — `resume/3` returns
   `{:suspended, values, lua}` with a fresh continuation — or raise a Lua
   error, which this protected boundary returns as `{:error, exception,
   lua}` (the continuation is cleared in every outcome). Heap effects made
   before the suspend are kept; effects made before a post-resume error are
   kept too, matching `pcall` semantics.
 
-  Raises `ArgumentError` when the `%Lua{}` carries no continuation.
+  Raises `ArgumentError` when the `%Lua{}` carries no continuation, or a
+  continuation with no machine layers.
 
-  A suspend that cannot be resumed — across a `pcall` boundary, a
-  metamethod, a `table.sort` comparator, a `string.gsub` replacement
-  function, or a re-entrant native call — is reported as an ordinary
-  catchable Lua error: `"attempt to suspend across a native call
-  boundary"`.
+  A suspend that cannot be resumed — across a `pcall` boundary, an
+  operator metamethod (`__add` and the other arithmetic and bitwise
+  metamethods, `__unm`, `__concat`, `__len`, `__eq`, `__lt`, `__le`), an
+  `__index`, `__newindex` or `__call` function, `__tostring`, a
+  generic-for iterator, a `table.sort` comparator, a `string.gsub`
+  replacement function, a `load` reader, a `require` loader, or a
+  re-entrant native call — is reported as an ordinary catchable Lua error:
+  `"attempt to suspend across a native call boundary"`.
+
+  > #### Continuations are trusted data {: .warning}
+  > A continuation holds VM internals, including prototypes that are run
+  > as they are. Never build one from, or deserialize one out of,
+  > untrusted input. A continuation is also not bound to the state it came
+  > from: resume it only on the `%Lua{}` its suspend returned (or a later
+  > state of that same evaluation). Grafting it onto another `%Lua{}`
+  > runs its registers against a heap that does not hold the tables they
+  > refer to.
+
+  ## Options
+
+    * `:decode` - (default `true`) Decodes the results, and the values of
+      a further suspend, as `eval!/3` does. Pass `decode: false` to get
+      encoded values, as `call_function/3` returns them.
+
+      iex> lua = Lua.new() |> Lua.set!([:yield], fn [v], lua -> {:suspend, [v], lua} end)
+      iex> {:suspended, [1], lua} = Lua.eval!(lua, "local a = yield(1) return {a, 2}")
+      iex> {:ok, [[{1, 1}, {2, 2}]], _lua} = Lua.resume(lua, [1])
   """
-  @spec resume(t(), [term()]) ::
+  @spec resume(t(), [term()], keyword()) ::
           {:ok, [term()], t()} | {:error, Exception.t(), t()} | {:suspended, [term()], t()}
-  def resume(%__MODULE__{continuation: nil}, _values) do
+  def resume(lua, values, opts \\ [])
+
+  def resume(%__MODULE__{continuation: nil}, _values, _opts) do
     raise ArgumentError, "no suspended continuation: the Lua VM is not parked at a suspend point"
   end
 
-  def resume(%__MODULE__{continuation: %Continuation{} = continuation, state: state} = lua, values) do
+  def resume(%__MODULE__{continuation: %Continuation{layers: []}}, _values, _opts) do
+    raise ArgumentError, "invalid continuation: it has no machine layers to resume"
+  end
+
+  def resume(%__MODULE__{continuation: %Continuation{layers: [_ | _]} = continuation, state: state} = lua, values, opts)
+      when is_list(values) do
+    # Validated outside the rescue below, so a bad option raises instead of
+    # coming back as a Lua error.
+    opts = Keyword.validate!(opts, decode: true)
+    run_continuation(lua, continuation, values, state, opts[:decode])
+  end
+
+  defp run_continuation(lua, continuation, values, state, decode?) do
     case Continuation.run(continuation, values, state) do
       {:ok, results, new_state} ->
-        {:ok, results, %{lua | state: new_state, continuation: nil}}
+        {:ok, decode_results(results, new_state, decode?), %{lua | state: new_state, continuation: nil}}
 
       {:suspended, values, layers, new_state} ->
-        {:suspended, values, %{lua | state: new_state, continuation: %Continuation{layers: layers}}}
+        {:suspended, decode_results(values, new_state, decode?),
+         %{lua | state: new_state, continuation: %Continuation{layers: layers}}}
     end
   rescue
     e in [Lua.RuntimeException, Lua.CompilerException] ->
@@ -1095,20 +1133,24 @@ defmodule Lua do
       {:error, Lua.RuntimeException.exception(e), %{lua | state: recover_state(e, lua.state), continuation: nil}}
   end
 
+  # The same result treatment `eval!/3` gives its results and suspend values.
+  defp decode_results(values, state, true), do: Display.wrap_results(Value.decode_list(values, state), state, true)
+  defp decode_results(values, state, false), do: Display.wrap_results(values, state, false)
+
   @doc """
-  The raising variant of `resume/2`.
+  The raising variant of `resume/3`.
 
   Returns the final values (or `{:suspended, values, lua}` when the
   resumed evaluation suspends again) and raises `Lua.RuntimeException` on
-  a Lua error.
+  a Lua error. Takes the same options as `resume/3`.
 
       iex> lua = Lua.new() |> Lua.set!([:yield], fn [v], lua -> {:suspend, [v], lua} end)
       iex> {:suspended, _, lua} = Lua.eval!(lua, "return yield(1)")
       iex> {[42], _lua} = Lua.resume!(lua, [42])
   """
-  @spec resume!(t(), [term()]) :: {[term()], t()} | {:suspended, [term()], t()}
-  def resume!(%__MODULE__{} = lua, values) do
-    case resume(lua, values) do
+  @spec resume!(t(), [term()], keyword()) :: {[term()], t()} | {:suspended, [term()], t()}
+  def resume!(%__MODULE__{} = lua, values, opts \\ []) do
+    case resume(lua, values, opts) do
       {:ok, results, lua} -> {results, lua}
       {:suspended, values, lua} -> {:suspended, values, lua}
       {:error, e, _lua} -> raise e

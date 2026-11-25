@@ -29,6 +29,14 @@ defmodule Lua.VM.Continuation do
   > continuation is an immutable, in-memory term: it can be passed between
   > processes on one node and copied to branch, but it is not persistable
   > when a register holds a local fun.
+
+  > #### Trusted data only {: .warning}
+  > A continuation carries prototypes and register files that the VM runs
+  > as they are. Never build one from, or deserialize one out of, untrusted
+  > input. It is also not bound to the state it came from: resume it only
+  > on the `%Lua{}` its suspend returned (or a later state of that same
+  > evaluation). Grafted onto another `%Lua{}`, its table references point
+  > into a heap that does not hold those tables.
   """
 
   alias Lua.VM.State

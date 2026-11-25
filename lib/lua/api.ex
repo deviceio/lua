@@ -240,7 +240,7 @@ defmodule Lua.API do
   `{:suspend, values}` (or `{:suspend, values, lua}` to thread state, like a
   normal return). `Lua.eval!/2` / `Lua.call_function/3` then return
   `{:suspended, values, lua}` instead of raising, and the host resumes the
-  parked machine with `Lua.resume/2` — the values passed to `resume/2`
+  parked machine with `Lua.resume/3` — the values passed to `resume/3`
   become the suspended call's results inside Lua.
 
       deflua yield(value), state do
@@ -248,10 +248,13 @@ defmodule Lua.API do
       end
 
   Suspend values must be encoded Lua values, exactly like normal return
-  values. A suspend that cannot be resumed — across a `pcall` boundary, a
-  metamethod, a `table.sort` comparator, a `string.gsub` replacement
-  function, or a `deflua` that re-enters Lua and returns the inner
-  `{:suspended, ...}` tuple — is reported as the catchable Lua error
+  values. A suspend that cannot be resumed — across a `pcall` boundary, an
+  operator metamethod (`__add` and the other arithmetic and bitwise
+  metamethods, `__unm`, `__concat`, `__len`, `__eq`, `__lt`, `__le`), an
+  `__index`, `__newindex`, `__call` or `__tostring` function, a
+  generic-for iterator, a `table.sort` comparator, a `string.gsub`
+  replacement function, or a `deflua` that re-enters Lua and returns the
+  inner `{:suspended, ...}` tuple — is reported as the catchable Lua error
   `"attempt to suspend across a native call boundary"`.
 
   """

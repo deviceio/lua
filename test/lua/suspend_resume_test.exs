@@ -5,17 +5,22 @@ defmodule Lua.SuspendResumeTest do
   A `deflua` / Elixir callback suspends the running machine by returning
   `{:suspend, values}` (or `{:suspend, values, lua}` to thread state).
   `Lua.eval!/2` / `Lua.call_function/3` then return `{:suspended, values,
-  lua}` with a continuation on the `%Lua{}`, and `Lua.resume/2` re-enters
+  lua}` with a continuation on the `%Lua{}`, and `Lua.resume/3` re-enters
   the parked machine — the resume values become the suspended call's
   results inside Lua.
 
-  A suspend that cannot be resumed — across a `pcall` boundary, a
-  metamethod, a `table.sort` comparator, a `string.gsub` replacement
-  function, a generic-for iterator, or a re-entrant native call — surfaces
-  as the catchable Lua error `"attempt to suspend across a native call
+  A suspend that cannot be resumed — across a `pcall` boundary, an
+  operator metamethod, an `__index` / `__newindex` / `__call` /
+  `__tostring` function, a `table.sort` comparator, a `string.gsub`
+  replacement function, a generic-for iterator, a `load` reader, a
+  `require` loader, or a re-entrant native call — surfaces as the
+  catchable Lua error `"attempt to suspend across a native call
   boundary"`.
   """
   use ExUnit.Case, async: true
+
+  alias Lua.VM.Continuation
+  alias Lua.VM.Display.Table
 
   defmodule Scheduler do
     @moduledoc false
@@ -46,7 +51,7 @@ defmodule Lua.SuspendResumeTest do
       lua = yielder(Lua.new())
 
       assert {:suspended, [1, 2], lua} = Lua.eval!(lua, "return yield(1, 2)")
-      assert %Lua.VM.Continuation{} = lua.continuation
+      assert %Continuation{} = lua.continuation
     end
 
     test "resume values become the suspended call's results" do
@@ -67,7 +72,7 @@ defmodule Lua.SuspendResumeTest do
     test "suspend values stay encoded with decode: false" do
       lua = yielder(Lua.new())
 
-      assert {:suspended, [%Lua.VM.Display.Table{}], _lua} =
+      assert {:suspended, [%Table{}], _lua} =
                Lua.eval!(lua, "return yield({k = 'v'})", decode: false)
     end
 
@@ -146,7 +151,7 @@ defmodule Lua.SuspendResumeTest do
     end
   end
 
-  describe "resume/2" do
+  describe "resume/3" do
     test "chained suspends resume one at a time" do
       lua = yielder(Lua.new())
 
@@ -223,6 +228,48 @@ defmodule Lua.SuspendResumeTest do
       assert_raise ArgumentError, ~r/no suspended continuation/, fn ->
         Lua.resume(Lua.new(), [])
       end
+    end
+
+    test "resuming a continuation with no layers raises ArgumentError" do
+      lua = %{Lua.new() | continuation: %Continuation{layers: []}}
+
+      assert_raise ArgumentError, ~r/no machine layers/, fn -> Lua.resume(lua, []) end
+    end
+
+    test "resume values must be a list" do
+      lua = yielder(Lua.new())
+      {:suspended, _, lua} = Lua.eval!(lua, "return yield(1)")
+
+      assert_raise FunctionClauseError, fn -> Lua.resume(lua, :notalist) end
+    end
+
+    test "an unknown option raises instead of coming back as a Lua error" do
+      lua = yielder(Lua.new())
+      {:suspended, _, lua} = Lua.eval!(lua, "return yield(1)")
+
+      assert_raise ArgumentError, fn -> Lua.resume(lua, [1], bogus: true) end
+    end
+
+    test "results are decoded like eval! results" do
+      lua = yielder(Lua.new())
+      {:suspended, [[{1, 1}, {2, 2}]], lua} = Lua.eval!(lua, "local a = yield({1, 2}) return {a, 3}")
+
+      assert {:ok, [[{1, 1}, {2, 3}]], _} = Lua.resume(lua, [1])
+    end
+
+    test "the values of a further suspend are decoded too" do
+      lua = yielder(Lua.new())
+      {:suspended, [1], lua} = Lua.eval!(lua, "yield(1) return yield({k = 1})")
+
+      assert {:suspended, [[{"k", 1}]], lua} = Lua.resume(lua, [])
+      assert {[nil], _} = Lua.resume!(lua, [nil])
+    end
+
+    test "decode: false returns encoded values" do
+      lua = yielder(Lua.new())
+      {:suspended, _, lua} = Lua.eval!(lua, "local a = yield(1) return {a, 3}")
+
+      assert {:ok, [%Table{}], _} = Lua.resume(lua, [1], decode: false)
     end
 
     test "an unrelated eval between suspend and resume preserves the continuation" do
