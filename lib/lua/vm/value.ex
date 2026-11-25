@@ -296,9 +296,11 @@ defmodule Lua.VM.Value do
       decoded_pair_list?(list) ->
         raise Lua.RuntimeException, """
         cannot encode a list of {key, value} pairs into a Lua value. This is the \
-        shape `decode/2` produces for a table, and it does not round-trip back \
-        into the VM. Convert it to a map first (e.g. `Map.new/1`), which encodes \
-        as a Lua table.\
+        shape `Lua.eval!/2` and `Lua.decode!/2` produce for a table, and it does \
+        not round-trip back into the VM. Build a map instead (nested tables need \
+        to be maps too, so `Map.new/1` on the top level alone is not enough), or \
+        evaluate with `decode: false` to keep the table reference, which can be \
+        passed back to `Lua.set!/3` unchanged.\
         """
 
       true ->
@@ -344,7 +346,8 @@ defmodule Lua.VM.Value do
   defp keyword_list?(_), do: false
 
   # A non-empty list where every element is a `{key, value}` pair with a binary
-  # or number key: exactly what `decode/2` returns for a Lua table. The empty
+  # or number key: the common shape `decode/2` returns for a Lua table (boolean
+  # and table keys decode to other shapes and are not matched). The empty
   # list is already handled by `keyword_list?/1`, so this never matches `[]`.
   defp decoded_pair_list?([{k, _v} | rest]) when is_binary(k) or is_number(k), do: decoded_pair_list?(rest)
 
