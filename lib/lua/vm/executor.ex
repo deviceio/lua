@@ -4076,6 +4076,7 @@ defmodule Lua.VM.Executor do
   defp value_type(nil), do: nil
   defp value_type(v) when is_boolean(v), do: :boolean
   defp value_type(v) when is_number(v), do: :number
+  defp value_type(:nan), do: :number
   defp value_type(v) when is_binary(v), do: :string
   defp value_type({:tref, _}), do: :table
   defp value_type({:lua_closure, _, _}), do: :function

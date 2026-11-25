@@ -984,6 +984,9 @@ defmodule Lua do
   @doc """
   Encodes a Lua value into its internal form
 
+  The atom `:nan` encodes to Lua's NaN number (and decodes back to `:nan`), so
+  it is a number in Lua, not the string `"nan"`.
+
       <!-- Old Luerl implementation returned specific tref IDs: {encoded, _} = Lua.encode!(Lua.new(), %{a: 1}); encoded => {:tref, 14} -->
 
       iex> {encoded, _} = Lua.encode!(Lua.new(), %{a: 1})

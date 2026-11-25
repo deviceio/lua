@@ -31,4 +31,23 @@ defmodule Lua.VM.LengthOperatorTest do
     assert [false, message] = run!("return pcall(function() return #nil end)")
     assert message =~ "attempt to get length of a nil value"
   end
+
+  describe "suggestion text" do
+    for {literal, article_type} <- [{"print", "a function"}, {"(0/0)", "a number"}, {"nil", "a nil"}] do
+      test "names the operand as #{article_type}" do
+        exception =
+          assert_raise Lua.RuntimeException, fn ->
+            Lua.eval!(Lua.new(), "return #" <> unquote(literal))
+          end
+
+        assert Lua.format_exception(exception) =~ "not #{unquote(article_type)}"
+      end
+    end
+  end
+
+  test "# raises in a function that falls back to the interpreter" do
+    code = "local function f(x) return (x and 1 or 2), #x end return pcall(f, 5)"
+    assert [false, message] = run!(code)
+    assert message =~ "attempt to get length of a number value"
+  end
 end

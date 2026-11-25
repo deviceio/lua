@@ -308,6 +308,7 @@ defmodule Lua.VM.ErrorFormatter do
   defp format_type_name(:string), do: "string"
   defp format_type_name(:boolean), do: "boolean"
   defp format_type_name(:table), do: "table"
+  defp format_type_name(:function), do: "function"
   defp format_type_name(nil), do: "nil"
   defp format_type_name(_), do: "value"
 end
