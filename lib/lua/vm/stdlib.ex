@@ -251,7 +251,7 @@ defmodule Lua.VM.Stdlib do
   # made before raising are kept via the exception's `:state` snapshot
   # (Lua 5.3 §2.3) — see `State.unwind_to/2`.
   defp lua_pcall([func | args], state) do
-    {results, state} = Executor.call_function(func, args, state)
+    {results, state} = Executor.call_function_resumable(func, args, state)
     {[true | results], state}
   rescue
     # A suspend crossing the pcall boundary cannot be resumed: the Elixir
@@ -278,7 +278,7 @@ defmodule Lua.VM.Stdlib do
   # (reference Lua invokes the handler before the stack unwinds, with the
   # heap intact).
   defp lua_xpcall([func, handler | args], state) do
-    {results, state} = Executor.call_function(func, args, state)
+    {results, state} = Executor.call_function_resumable(func, args, state)
     {[true | results], state}
   rescue
     # Same boundary as pcall: a suspend is reported to the message handler
@@ -299,7 +299,7 @@ defmodule Lua.VM.Stdlib do
   # If the handler itself fails, return the original error — keeping any
   # heap effects the handler made before its own error.
   defp run_xpcall_handler(handler, error_msg, state) do
-    {handler_results, state} = Executor.call_function(handler, [error_msg], state)
+    {handler_results, state} = Executor.call_function_resumable(handler, [error_msg], state)
     {[false | handler_results], state}
   rescue
     # A handler that suspends crosses the same native boundary: report it
@@ -524,7 +524,7 @@ defmodule Lua.VM.Stdlib do
   defp collect_reader_chunks(reader, state, acc, size) do
     # A reader that suspends cannot be resumed here: the loop's own frame is
     # not a VM machine frame, so there is no continuation to capture.
-    {results, state} = Suspend.guard(fn -> Executor.call_function(reader, [], state) end)
+    {results, state} = Executor.call_function(reader, [], state)
 
     case results do
       [] ->
@@ -758,7 +758,7 @@ defmodule Lua.VM.Stdlib do
     state = cache_module_result(state, modname, true)
     # A preload loader that suspends cannot be resumed here — same native
     # boundary as a re-entrant deflua.
-    {results, state} = Suspend.guard(fn -> Executor.call_function(loader, [modname], state) end)
+    {results, state} = Executor.call_function(loader, [modname], state)
 
     result =
       case results do
@@ -881,7 +881,7 @@ defmodule Lua.VM.Stdlib do
                 # A __tostring metamethod that suspends cannot be resumed:
                 # tostring's own frame is not capturable.
                 {results, state} =
-                  Suspend.guard(fn -> Executor.call_function(tostring_fn, [value], state) end)
+                  Executor.call_function(tostring_fn, [value], state)
 
                 {List.first(results) || "nil", state}
             end

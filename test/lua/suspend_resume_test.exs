@@ -369,110 +369,103 @@ defmodule Lua.SuspendResumeTest do
                  "return xpcall(function() return yield(1) end, function(e) return 'handled: ' .. e end)"
                )
     end
+  end
 
-    test "__index metamethod" do
-      lua = yielder(Lua.new())
+  # Each case runs outside `pcall`: the boundary error must come from the
+  # site the suspend crosses, not from a surrounding protected call.
+  # `after` is never reached: a suspend that is wrongly treated as
+  # resumable would make `eval!` return `{:suspended, ...}` instead.
+  @operator_cases [
+    add: "local t = setmetatable({}, {__add = function() return yield('mm') end}) local x = t + 1",
+    sub: "local t = setmetatable({}, {__sub = function() return yield('mm') end}) local x = t - 1",
+    mul: "local t = setmetatable({}, {__mul = function() return yield('mm') end}) local x = t * 2",
+    div: "local t = setmetatable({}, {__div = function() return yield('mm') end}) local x = t / 2",
+    mod: "local t = setmetatable({}, {__mod = function() return yield('mm') end}) local x = t % 2",
+    pow: "local t = setmetatable({}, {__pow = function() return yield('mm') end}) local x = t ^ 2",
+    idiv: "local t = setmetatable({}, {__idiv = function() return yield('mm') end}) local x = t // 2",
+    band: "local t = setmetatable({}, {__band = function() return yield('mm') end}) local x = t & 1",
+    bor: "local t = setmetatable({}, {__bor = function() return yield('mm') end}) local x = t | 1",
+    bxor: "local t = setmetatable({}, {__bxor = function() return yield('mm') end}) local x = t ~ 1",
+    shl: "local t = setmetatable({}, {__shl = function() return yield('mm') end}) local x = t << 1",
+    shr: "local t = setmetatable({}, {__shr = function() return yield('mm') end}) local x = t >> 1",
+    bnot: "local t = setmetatable({}, {__bnot = function() return yield('mm') end}) local x = ~t",
+    unm: "local t = setmetatable({}, {__unm = function() return yield('mm') end}) local x = -t",
+    concat: "local t = setmetatable({}, {__concat = function() return yield('mm') end}) local x = t .. 'x'",
+    len: "local t = setmetatable({}, {__len = function() return yield('mm') end}) local x = #t",
+    eq:
+      "local m = {__eq = function() return yield('mm') end} local a, b = setmetatable({}, m), setmetatable({}, m) local x = a == b",
+    lt:
+      "local m = {__lt = function() return yield('mm') end} local a, b = setmetatable({}, m), setmetatable({}, m) local x = a < b",
+    le:
+      "local m = {__le = function() return yield('mm') end} local a, b = setmetatable({}, m), setmetatable({}, m) local x = a <= b",
+    le_via_lt:
+      "local m = {__lt = function() return yield('mm') end} local a, b = setmetatable({}, m), setmetatable({}, m) local x = a <= b",
+    native_metamethod: "local t = setmetatable({}, {__add = yield}) local x = t + 1"
+  ]
 
-      assert {[false, msg], _} =
-               Lua.eval!(
-                 lua,
-                 "return pcall(function() local t = setmetatable({}, {__index = function(_, k) return yield(k) end}) return t.foo end)"
-               )
+  @callback_cases [
+    index: "local t = setmetatable({}, {__index = function(_, k) return yield(k) end}) local x = t.foo",
+    newindex: "local t = setmetatable({}, {__newindex = function(_, k, v) yield(v) end}) t.foo = 1",
+    call: "local t = setmetatable({}, {__call = function(_, x) return yield(x) end}) local x = t(1)",
+    tostring: "local t = setmetatable({}, {__tostring = function() return yield() end}) local x = tostring(t)",
+    sort_comparator: "table.sort({3, 1, 2}, function(a, b) yield(a) return a < b end)",
+    gsub: "string.gsub('abc', '.', function(s) yield(s) return s end)",
+    generic_for: "local function iter() return function() yield() return nil end end for _ in iter() do end",
+    ipairs_index:
+      "local p = setmetatable({}, {__index = function(_, i) if i < 3 then return yield(i) end end}) for _ in ipairs(p) do end",
+    unpack_index:
+      "local p = setmetatable({}, {__index = function(_, i) return yield(i) end}) local x = table.unpack(p, 1, 1)",
+    preload: "package.preload.m = function() return yield('pre') end local m = require('m')"
+  ]
 
-      assert msg =~ @boundary_message
+  defp assert_boundary(lua, code) do
+    error = assert_raise Lua.RuntimeException, fn -> Lua.eval!(lua, code) end
+    assert Exception.message(error) =~ @boundary_message
+  end
+
+  defp nested(body), do: "local function f() #{body} return 'inner' end local r = f() return 'after', r"
+
+  describe "boundaries outside pcall: operator metamethods" do
+    for {name, body} <- @operator_cases do
+      @body body
+
+      test "#{name} in the main chunk" do
+        assert_boundary(yielder(Lua.new()), @body <> " return 'after', x")
+      end
+
+      test "#{name} in a nested function" do
+        assert_boundary(yielder(Lua.new()), nested(@body))
+      end
     end
+  end
 
-    test "__newindex metamethod" do
-      lua = yielder(Lua.new())
+  describe "boundaries outside pcall: metamethod and stdlib callbacks" do
+    for {name, body} <- @callback_cases do
+      @body body
 
-      assert {[false, msg], _} =
-               Lua.eval!(
-                 lua,
-                 "return pcall(function() local t = setmetatable({}, {__newindex = function(_, k, v) yield(v) end}) t.foo = 1 end)"
-               )
+      test "#{name} in the main chunk" do
+        assert_boundary(yielder(Lua.new(sandboxed: [])), @body <> " return 'after'")
+      end
 
-      assert msg =~ @boundary_message
-    end
-
-    test "arithmetic metamethod" do
-      lua = yielder(Lua.new())
-
-      assert {[false, msg], _} =
-               Lua.eval!(
-                 lua,
-                 "return pcall(function() local t = setmetatable({}, {__add = function() return yield(1) end}) return t + 1 end)"
-               )
-
-      assert msg =~ @boundary_message
-    end
-
-    test "__call metamethod" do
-      lua = yielder(Lua.new())
-
-      assert {[false, msg], _} =
-               Lua.eval!(
-                 lua,
-                 "return pcall(function() local t = setmetatable({}, {__call = function(_, x) return yield(x) end}) return t(1) end)"
-               )
-
-      assert msg =~ @boundary_message
-    end
-
-    test "__tostring metamethod" do
-      lua = Lua.set!(Lua.new(), [:yield], fn args, lua -> {:suspend, args, lua} end)
-
-      assert {[false, msg], _} =
-               Lua.eval!(
-                 lua,
-                 "return pcall(function() local t = setmetatable({}, {__tostring = function() return yield() end}) return tostring(t) end)"
-               )
-
-      assert msg =~ @boundary_message
-    end
-
-    test "table.sort comparator" do
-      lua = yielder(Lua.new())
-
-      assert {[false, msg], _} =
-               Lua.eval!(
-                 lua,
-                 "return pcall(function() table.sort({3, 1, 2}, function(a, b) yield(a) return a < b end) end)"
-               )
-
-      assert msg =~ @boundary_message
-    end
-
-    test "string.gsub replacement function" do
-      lua = yielder(Lua.new())
-
-      assert {[false, msg], _} =
-               Lua.eval!(
-                 lua,
-                 "return pcall(function() return string.gsub('abc', '.', function(s) yield(s) return s end) end)"
-               )
-
-      assert msg =~ @boundary_message
-    end
-
-    test "generic-for iterator" do
-      lua = yielder(Lua.new())
-
-      assert {[false, msg], _} =
-               Lua.eval!(
-                 lua,
-                 "return pcall(function() local function iter() return function() yield() return nil end end for _ in iter() do end end)"
-               )
-
-      assert msg =~ @boundary_message
+      test "#{name} in a nested function" do
+        assert_boundary(yielder(Lua.new(sandboxed: [])), nested(@body))
+      end
     end
 
     test "load reader function" do
-      lua = yielder(Lua.new(sandboxed: []))
+      assert_boundary(
+        yielder(Lua.new(sandboxed: [])),
+        "local f = load(function() yield() return 'return 1' end) return 'after'"
+      )
+    end
 
-      assert {[false, msg], _} =
+    test "a pcall inside the metamethod still sees the boundary as a Lua error" do
+      lua = yielder(Lua.new())
+
+      assert {["after", msg], _} =
                Lua.eval!(
                  lua,
-                 "return pcall(function() return load(function() yield() return 'return 1' end) end)"
+                 "local t = setmetatable({}, {__add = function() local _, e = pcall(yield, 1) return e end}) local e = t + 1 return 'after', e"
                )
 
       assert msg =~ @boundary_message

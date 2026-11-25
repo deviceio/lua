@@ -179,11 +179,30 @@ defmodule Lua.VM.Executor do
   @doc """
   Calls a Lua function value with the given arguments.
 
-  Used by pcall/xpcall to invoke functions in protected mode.
-  Returns {results, final_state}.
+  Returns `{results, final_state}`. The caller's Elixir frame cannot be
+  captured into a continuation, so a suspend escaping the callee is a
+  boundary error here (`Lua.VM.Suspend.boundary_message/0`). This is the
+  entry point for every re-entry that cannot resume mid-call: operator
+  metamethods, `__index` / `__newindex` / `__call` functions, generic-for
+  iterators and stdlib callbacks. A site that does capture a continuation
+  layer for the suspend calls `call_function_resumable/3` instead.
   """
   @spec call_function(term(), list(), State.t()) :: {list(), State.t()}
-  def call_function({:lua_closure, callee_proto, callee_upvalues}, args, state) do
+  def call_function(callable, args, state) do
+    call_function_resumable(callable, args, state)
+  rescue
+    e in Suspend -> Suspend.raise_boundary!(e, fallback_state: state)
+  end
+
+  @doc """
+  Like `call_function/3`, but lets a `Lua.VM.Suspend` escape the callee.
+
+  Only for callers that handle the suspend themselves: the engine bridges
+  that push a continuation layer for it, the programmatic `Lua` entry
+  points, and `pcall` / `xpcall`, which report it as a protected error.
+  """
+  @spec call_function_resumable(term(), list(), State.t()) :: {list(), State.t()}
+  def call_function_resumable({:lua_closure, callee_proto, callee_upvalues}, args, state) do
     callee_regs =
       Tuple.duplicate(nil, max(callee_proto.max_registers, callee_proto.param_count))
 
@@ -233,7 +252,7 @@ defmodule Lua.VM.Executor do
     end
   end
 
-  def call_function({:compiled_closure, callee_proto, callee_upvalues}, args, state) do
+  def call_function_resumable({:compiled_closure, callee_proto, callee_upvalues}, args, state) do
     # Compiled callees route through the dispatcher. The dispatcher manages
     # its own register file setup and vararg routing, and isolates open
     # upvalues by threading them as a dispatch-loop parameter seeded empty
@@ -247,7 +266,7 @@ defmodule Lua.VM.Executor do
   # protected calls can keep heap effects made before the error without
   # every bad-argument check threading state into its raise. Innermost
   # annotation wins — see `annotate_frame_state/2`.
-  def call_function({:native_func, fun}, args, state) do
+  def call_function_resumable({:native_func, fun}, args, state) do
     case fun.(args, state) do
       {results, %State{} = new_state} when is_list(results) ->
         {results, new_state}
@@ -259,7 +278,7 @@ defmodule Lua.VM.Executor do
     e -> reraise annotate_frame_state(e, state), __STACKTRACE__
   end
 
-  def call_function(nil, _args, state) do
+  def call_function_resumable(nil, _args, state) do
     raise TypeError,
       value: "attempt to call a nil value",
       error_kind: :call_nil,
@@ -267,7 +286,7 @@ defmodule Lua.VM.Executor do
       state: state
   end
 
-  def call_function(other, args, state) do
+  def call_function_resumable(other, args, state) do
     # Check for __call metamethod
     case get_metatable(other, state) do
       nil ->
@@ -289,7 +308,7 @@ defmodule Lua.VM.Executor do
               state: state
 
           call_mm ->
-            Suspend.guard(fn -> call_function(call_mm, [other | args], state) end)
+            call_function(call_mm, [other | args], state)
         end
     end
   end
@@ -613,10 +632,10 @@ defmodule Lua.VM.Executor do
   end
 
   def dispatcher_call_function({:lua_closure, _, _} = closure, args, state, _proto, _name_hint, _line),
-    do: call_function(closure, args, state)
+    do: call_function_resumable(closure, args, state)
 
   def dispatcher_call_function({:compiled_closure, _, _} = closure, args, state, _proto, _name_hint, _line),
-    do: call_function(closure, args, state)
+    do: call_function_resumable(closure, args, state)
 
   def dispatcher_call_function({:native_func, _} = nf, args, state, proto, _name_hint, line) do
     # Publish the source line baked into the call opcode by the encoder so
@@ -634,7 +653,7 @@ defmodule Lua.VM.Executor do
     :erlang.put(@position_key, {line, proto.source})
 
     try do
-      call_function(nf, args, state)
+      call_function_resumable(nf, args, state)
     after
       case prev_pos do
         :undefined -> :erlang.erase(@position_key)
@@ -670,7 +689,7 @@ defmodule Lua.VM.Executor do
               state: state
 
           call_mm ->
-            Suspend.guard(fn -> call_function(call_mm, [other | args], state) end)
+            call_function(call_mm, [other | args], state)
         end
     end
   end
@@ -1709,7 +1728,7 @@ defmodule Lua.VM.Executor do
                 state = %{state | instruction_count: instruction_count}
 
                 {results, state} =
-                  Suspend.guard(fn -> call_function(call_mm, [other | args], state) end)
+                  call_function(call_mm, [other | args], state)
 
                 instruction_count = state.instruction_count
 
@@ -3358,8 +3377,9 @@ defmodule Lua.VM.Executor do
 
   defp do_call_value({:compiled_closure, _, _} = closure, args, _proto, state, _line) do
     # Compiled-closure callees for generic_for iterators reuse the same
-    # dispatcher bridge as `call_function/3`.
-    call_function(closure, args, state)
+    # dispatcher bridge as `call_function/3`; `call_value/5` turns an
+    # escaping suspend into the boundary error.
+    call_function_resumable(closure, args, state)
   end
 
   defp do_call_value({:native_func, fun}, args, proto, state, line) do
@@ -3501,7 +3521,7 @@ defmodule Lua.VM.Executor do
 
           func when is_tuple(func) ->
             {results, state} =
-              Suspend.guard(fn -> call_function(func, [value, key], state) end)
+              call_function(func, [value, key], state)
 
             {List.first(results), state}
         end
@@ -3625,7 +3645,7 @@ defmodule Lua.VM.Executor do
 
               func when is_tuple(func) ->
                 {results, state} =
-                  Suspend.guard(fn -> call_function(func, [{:tref, id}, key], state) end)
+                  call_function(func, [{:tref, id}, key], state)
 
                 {List.first(results), state}
             end
@@ -3684,7 +3704,7 @@ defmodule Lua.VM.Executor do
 
             func when is_tuple(func) ->
               {_results, state} =
-                Suspend.guard(fn -> call_function(func, [{:tref, id}, key, value], state) end)
+                call_function(func, [{:tref, id}, key, value], state)
 
               state
           end

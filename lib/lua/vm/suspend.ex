@@ -7,10 +7,12 @@ defmodule Lua.VM.Suspend do
   # Not a Lua error: it is never wrapped into `Lua.RuntimeException` and never
   # handed to `pcall` as an error value. It travels from the callback's raise
   # site up to the nearest VM call boundary, where the executor/dispatcher
-  # catch it and attach a resumable machine layer (`layers`), or a boundary
-  # guard converts it into a `Lua.VM.RuntimeError` when resumption is
-  # impossible (metamethods, generic-for iterators, sort/gsub callbacks,
-  # `pcall`/`xpcall`, re-entrant natives).
+  # catch it and attach a resumable machine layer (`layers`). Every other
+  # re-entry goes through `Lua.VM.Executor.call_function/3`, which turns it
+  # into a `Lua.VM.RuntimeError` because resumption is impossible there
+  # (operator metamethods, `__index` / `__newindex` / `__call`, generic-for
+  # iterators, stdlib callbacks); `pcall`/`xpcall` and re-entrant natives
+  # report it the same way.
   #
   # Fields:
   #
@@ -35,23 +37,6 @@ defmodule Lua.VM.Suspend do
   """
   @spec boundary_message() :: String.t()
   def boundary_message, do: "attempt to suspend across a native call boundary"
-
-  @doc """
-  Runs `fun`, converting any `Lua.VM.Suspend` escaping it into a
-  `Lua.VM.RuntimeError` boundary error.
-
-  Used at native-call paths that cannot resume mid-call (metamethods,
-  generic-for iterators, sort/gsub callbacks, `load` readers, `require`
-  loaders, `__tostring`): the machine is parked at a site with no
-  continuation capture, so a suspend there is a boundary error, not a
-  resumable suspension.
-  """
-  @spec guard((-> result)) :: result when result: any()
-  def guard(fun) when is_function(fun, 0) do
-    fun.()
-  rescue
-    e in __MODULE__ -> raise RuntimeError, value: boundary_message(), state: e.state
-  end
 
   @doc """
   Raises the boundary error for a suspend that cannot be resumed.

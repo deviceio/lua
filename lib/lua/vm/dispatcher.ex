@@ -1962,7 +1962,7 @@ defmodule Lua.VM.Dispatcher do
 
             {results, state} =
               try do
-                Executor.call_function(closure, args, state)
+                Executor.call_function_resumable(closure, args, state)
               rescue
                 e in Suspend ->
                   layer =
@@ -2585,7 +2585,7 @@ defmodule Lua.VM.Dispatcher do
 
     {_results, state} =
       try do
-        Executor.call_function(closure, args, state)
+        Executor.call_function_resumable(closure, args, state)
       rescue
         e in Suspend ->
           layer =
@@ -2665,7 +2665,7 @@ defmodule Lua.VM.Dispatcher do
 
     {results, state} =
       try do
-        Executor.call_function(closure, args, state)
+        Executor.call_function_resumable(closure, args, state)
       rescue
         e in Suspend ->
           layer =

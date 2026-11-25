@@ -969,7 +969,7 @@ defmodule Lua do
   defp do_call_function({:compiled_closure, _, _} = closure, args, state) do
     # Compiled callees route through the dispatcher; same observable
     # contract as the interpreter branch above.
-    {results, new_state} = Executor.call_function(closure, args, state)
+    {results, new_state} = Executor.call_function_resumable(closure, args, state)
     {:ok, results, new_state}
   rescue
     e in Suspend ->
