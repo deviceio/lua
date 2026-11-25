@@ -294,6 +294,51 @@ defmodule Lua.SuspendResumeTest do
       assert {:error, exception, _} = Lua.resume(lua, [1])
       assert Exception.message(exception) =~ "instruction budget exceeded"
     end
+
+    test ":max_instructions counts Lua a callback ran before it suspended" do
+      run_then = fn reply ->
+        fn _args, lua ->
+          {_, lua} = Lua.eval!(lua, "local s = 0 for i = 1, 6 do s = s + i end")
+          reply.(lua)
+        end
+      end
+
+      code = "work() local s = 0 for i = 1, 6 do s = s + i end return s"
+      lua = Lua.new(max_instructions: 10)
+
+      # Without a suspend, the two loops together exceed the budget.
+      assert_raise Lua.RuntimeException, ~r/instruction budget exceeded/, fn ->
+        Lua.eval!(Lua.set!(lua, [:work], run_then.(&{[1], &1})), code)
+      end
+
+      # A suspend between them must not refund the callback's loop.
+      {:suspended, [1], lua} = Lua.eval!(Lua.set!(lua, [:work], run_then.(&{:suspend, [1], &1})), code)
+      assert {:error, exception, _} = Lua.resume(lua, [])
+      assert Exception.message(exception) =~ "instruction budget exceeded"
+    end
+
+    test ":max_instructions counts a suspending callback's Lua in a nested function" do
+      lua =
+        [max_instructions: 10]
+        |> Lua.new()
+        |> Lua.set!([:work], fn _args, lua ->
+          {_, lua} = Lua.eval!(lua, "local s = 0 for i = 1, 6 do s = s + i end")
+          {:suspend, [1], lua}
+        end)
+
+      code = "local function f() work() local s = 0 for i = 1, 6 do s = s + i end return s end return f()"
+      {:suspended, [1], lua} = Lua.eval!(lua, code)
+      assert {:error, exception, _} = Lua.resume(lua, [])
+      assert Exception.message(exception) =~ "instruction budget exceeded"
+    end
+
+    test "a host exception after the resume comes back in the error tuple" do
+      lua = Lua.new() |> yielder() |> Lua.set!([:bad], fn _args, _lua -> :not_a_result end)
+      {:suspended, _, lua} = Lua.eval!(lua, "yield(1) return bad()")
+
+      assert {:error, %Lua.RuntimeException{}, lua} = Lua.resume(lua, [])
+      assert lua.continuation == nil
+    end
   end
 
   describe "nested functions (dispatcher path)" do

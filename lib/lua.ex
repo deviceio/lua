@@ -1126,8 +1126,11 @@ defmodule Lua do
          %{lua | state: new_state, continuation: %Continuation{layers: layers}}}
     end
   rescue
+    # A host-facing exception raised after the resume (a callback returning
+    # invalid data, a failing nested `eval!`) comes back in the error tuple
+    # as it is, as `call_function/3` returns it, instead of escaping.
     e in [Lua.RuntimeException, Lua.CompilerException] ->
-      reraise e, __STACKTRACE__
+      {:error, e, %{lua | state: recover_state(e, lua.state), continuation: nil}}
 
     e ->
       {:error, Lua.RuntimeException.exception(e), %{lua | state: recover_state(e, lua.state), continuation: nil}}

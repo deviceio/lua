@@ -2754,7 +2754,8 @@ defmodule Lua.VM.Dispatcher do
   #
   # Returns the `Lua.VM.Suspend` exception to reraise (layer stack updated),
   # or raises the boundary `Lua.VM.RuntimeError`.
-  defp bridge_suspend(%Suspend{layers: nil} = e, layer, :native), do: %{e | layers: [layer]}
+  defp bridge_suspend(%Suspend{layers: nil} = e, layer, :native),
+    do: %{e | layers: [%{layer | instruction_count: Suspend.tally(e, layer.instruction_count)}]}
 
   defp bridge_suspend(%Suspend{} = e, _layer, :native), do: Suspend.raise_boundary!(e, fallback_state: e.state)
 

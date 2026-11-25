@@ -1651,7 +1651,7 @@ defmodule Lua.VM.Executor do
                     cont: cont,
                     frames: frames,
                     line: line,
-                    instruction_count: instruction_count,
+                    instruction_count: Suspend.tally(e, instruction_count),
                     base: base,
                     result_count: result_count,
                     open_upvalues: state.open_upvalues,

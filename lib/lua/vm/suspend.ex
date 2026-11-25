@@ -39,6 +39,18 @@ defmodule Lua.VM.Suspend do
   def boundary_message, do: "attempt to suspend across a native call boundary"
 
   @doc """
+  The instruction tally to park in the innermost continuation layer.
+
+  A callback may run Lua (`Lua.call_function!/3`, `Lua.eval!/3`) before it
+  suspends, so the state it suspends with can carry a higher tally than
+  the machine had when it made the call. Resume seeds the tally from the
+  layer, so parking the lower one would refund that work.
+  """
+  @spec tally(t(), non_neg_integer()) :: non_neg_integer()
+  def tally(%__MODULE__{state: %{instruction_count: count}}, at_call) when is_integer(count), do: max(count, at_call)
+  def tally(%__MODULE__{}, at_call), do: at_call
+
+  @doc """
   Raises the boundary error for a suspend that cannot be resumed.
 
   `fallback_state` is used when the exception carries no state of its own.
