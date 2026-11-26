@@ -1161,6 +1161,8 @@ defmodule Lua.VM.Stdlib.String do
 
         match?({:lua_closure, _, _}, repl) or match?({:compiled_closure, _, _}, repl) or match?({:native_func, _}, repl) ->
           fn args, st ->
+            # A replacement function that suspends cannot be resumed: the
+            # pattern engine's iteration frame is not capturable.
             {results, st} = Executor.call_function(repl, args, st)
             result = List.first(results)
             value = if result == nil or result == false, do: false, else: result

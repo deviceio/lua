@@ -426,6 +426,8 @@ defmodule Lua.VM.Stdlib.Table do
   end
 
   defp invoke_compare(comp, a, b, state) do
+    # A comparator that suspends cannot be resumed: the insertion-sort
+    # frame driving it is not capturable.
     {results, state} = Executor.call_function(comp, [a, b], state)
     {!!List.first(results), state}
   end

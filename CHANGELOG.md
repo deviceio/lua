@@ -49,6 +49,33 @@ is in the [`1.0.0-rc.0`](#100-rc0---2026-05-26) entry below.
 
 ## [Unreleased]
 
+### Added
+- Host-driven suspension and resumption of a Lua evaluation. A `deflua`
+  or Elixir callback (set via `Lua.set!/3`, `Lua.encode!/2`, or
+  `Lua.load_api/2`) can return `{:suspend, values}` — or `{:suspend,
+  values, lua}` to thread state — to park the running machine instead of
+  returning. `Lua.eval!/2` and `Lua.call_function/3` then return
+  `{:suspended, values, lua}` (values decoded and display-wrapped under
+  the `:decode` option, exactly like normal results), with a continuation
+  stored on the `%Lua{}`. The new `Lua.resume/3` / `Lua.resume!/3`
+  re-enter the parked machine; the resume values become the suspended
+  call's results inside Lua, and a resumed evaluation may suspend again.
+  Their results, and the values of a further suspend, are decoded under
+  a `:decode` option (default `true`), as `eval!` does.
+  Heap effects made before a suspend are kept, as are effects made
+  before a post-resume error (matching `pcall` semantics) while the call
+  frames of the failed evaluation are dropped, and a
+  `:max_instructions` budget spans the whole suspend/resume cycle. A
+  suspend that cannot be resumed — across a `pcall`/`xpcall` boundary, an
+  operator metamethod (`__add` and the other arithmetic and bitwise
+  metamethods, `__unm`, `__concat`, `__len`, `__eq`, `__lt`, `__le`), an
+  `__index`, `__newindex`, `__call` or `__tostring` function, a
+  `table.sort` comparator, a `string.gsub` replacement function, a
+  generic-for iterator, a `load` reader, a `require` loader, or a
+  re-entrant native call — is reported as the catchable Lua error `"attempt to
+  suspend across a native call boundary"`. Full `coroutine`
+  yield/resume remains a separate non-goal.
+
 ### Fixed
 - `:max_string_bytes` is now enforced by `table.concat`, `string.gsub`,
   `string.format`, `string.pack` and `os.date`, which previously built results
