@@ -299,4 +299,17 @@ defmodule Lua.Language.LoopCapturedLocalTest do
                """)
     end
   end
+
+  describe "function declarations assigning a captured local" do
+    test "function f() in a loop before a closure captures f" do
+      assert run("""
+             local f
+             for i = 1, 1 do
+               function f() return 42 end
+               local g = function() return f end
+               return g()()
+             end
+             """) == [42]
+    end
+  end
 end
