@@ -153,6 +153,92 @@ defmodule Lua.VM.Stdlib.OsTest do
     end
   end
 
+  describe "os.time field validation" do
+    test "sec = 60 rolls into the next minute" do
+      assert normalize("year=2026, month=1, day=1, hour=0, min=0, sec=60") == {2026, 1, 1, 0, 1, 0}
+    end
+
+    test "years past 9999 are computed, not rejected" do
+      assert time_of("year=9999, month=13, day=1, hour=0") == 253_402_300_800
+    end
+
+    for field <- ~w(year month day hour min sec) do
+      test "#{field} beyond the C int range is out-of-bound" do
+        base = %{"year" => 2026, "month" => 1, "day" => 1, "hour" => 0, "min" => 0, "sec" => 0}
+
+        for huge <- ["2^31 + 2000", "2^40", "2^60", "-2^40", "-2^62", "math.maxinteger", "math.mininteger"] do
+          fields = base |> Map.put("#{unquote(field)}", huge) |> fields_to_lua()
+
+          assert {:error, msg} = time_error(fields)
+          assert msg =~ "field '#{unquote(field)}' is out-of-bound"
+        end
+      end
+    end
+
+    test "the C int boundary is inclusive, with the year and month offsets" do
+      # year is checked after subtracting 1900, month after subtracting 1.
+      assert {:ok, _} = time_error("year=2^31 - 1 + 1900, month=1, day=1")
+      assert {:error, msg} = time_error("year=2^31 + 1900, month=1, day=1")
+      assert msg =~ "field 'year' is out-of-bound"
+      assert {:ok, _} = time_error("year=-2^31 + 1900, month=1, day=1")
+      assert {:error, msg} = time_error("year=-2^31 + 1899, month=1, day=1")
+      assert msg =~ "field 'year' is out-of-bound"
+      assert {:ok, _} = time_error("year=2026, month=2^31, day=1")
+      assert {:error, msg} = time_error("year=2026, month=2^31 + 1, day=1")
+      assert msg =~ "field 'month' is out-of-bound"
+      assert {:ok, _} = time_error("year=2026, month=1, day=2^31 - 1")
+      assert {:error, msg} = time_error("year=2026, month=1, day=2^31")
+      assert msg =~ "field 'day' is out-of-bound"
+    end
+
+    test "results stay within 64 bits for the largest accepted fields" do
+      for fields <- [
+            "year=2^31 - 1 + 1900, month=2^31, day=2^31 - 1, hour=2^31 - 1, min=2^31 - 1, sec=2^31 - 1",
+            "year=-2^31 + 1900, month=-2^31 + 1, day=-2^31, hour=-2^31, min=-2^31, sec=-2^31"
+          ] do
+        {[t], _} = Lua.eval!("return os.time({#{fields}})")
+        assert is_integer(t)
+        assert t >= -9_223_372_036_854_775_808 and t <= 9_223_372_036_854_775_807
+      end
+    end
+
+    test "fields with no integer representation raise 'not an integer'" do
+      for value <- ["1.5", "1/0", "-1/0", "0/0", "'x'", "{}", "true", "1e308"] do
+        assert {:error, msg} = time_error("year=2026, month=1, day=1, hour=#{value}")
+        assert msg =~ "field 'hour' is not an integer"
+      end
+
+      assert {:error, msg} = time_error("year=2026, month=1.5, day=1")
+      assert msg =~ "field 'month' is not an integer"
+    end
+
+    test "floats with an exact integer value and numeric strings are accepted" do
+      assert time_of("year=2026.0, month=1, day=1, hour=3.0") == time_of("year=2026, month=1, day=1, hour=3")
+      assert time_of("year=2026, month=1, day=1, hour='3'") == time_of("year=2026, month=1, day=1, hour=3")
+      assert time_of("year='2026', month='1', day='1'") == time_of("year=2026, month=1, day=1")
+    end
+
+    test "a missing required field still raises 'missing'" do
+      assert {:error, msg} = time_error("month=1, day=1")
+      assert msg =~ "field 'year' missing"
+    end
+  end
+
+  defp fields_to_lua(map), do: Enum.map_join(map, ", ", fn {k, v} -> "#{k}=#{v}" end)
+
+  defp time_of(fields) do
+    {[t], _} = Lua.eval!("return os.time({#{fields}})")
+    t
+  end
+
+  # Runs os.time under pcall so the Lua error message is available as a string.
+  defp time_error(fields) do
+    case Lua.eval!("return pcall(os.time, {#{fields}})") do
+      {[true, _], _} -> {:ok, nil}
+      {[false, msg], _} -> {:error, msg}
+    end
+  end
+
   defp normalize(fields) do
     code = """
     local t = os.date("!*t", os.time({#{fields}}))

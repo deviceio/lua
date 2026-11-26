@@ -29,6 +29,7 @@ defmodule Lua.VM.Stdlib.Os do
   alias Lua.VM.RuntimeError
   alias Lua.VM.State
   alias Lua.VM.Stdlib.Util
+  alias Lua.VM.Value
 
   @impl true
   def lib_name, do: "os"
@@ -96,15 +97,15 @@ defmodule Lua.VM.Stdlib.Os do
   defp os_time([{:tref, _} = tref | _], state) do
     data = State.get_table(state, tref).data
 
-    year = required_field(data, "year", "os.time")
-    month = required_field(data, "month", "os.time")
-    day = required_field(data, "day", "os.time")
-    hour = optional_field(data, "hour", 12)
-    min = optional_field(data, "min", 0)
-    sec = optional_field(data, "sec", 0)
+    year = date_field(data, "year", 1900, :required)
+    month = date_field(data, "month", 1, :required)
+    day = date_field(data, "day", 0, :required)
+    hour = date_field(data, "hour", 0, 12)
+    min = date_field(data, "min", 0, 0)
+    sec = date_field(data, "sec", 0, 0)
 
     seconds =
-      naive_to_epoch(%{
+      date_fields_to_epoch(%{
         year: year,
         month: month,
         day: day,
@@ -198,29 +199,63 @@ defmodule Lua.VM.Stdlib.Os do
 
   ## Helpers
 
-  defp required_field(data, key, fn_name) do
-    case Map.get(data, key) do
-      n when is_number(n) ->
-        trunc(n)
+  # Reads one date-table field the way PUC-Lua's `getfield` in loslib.c does:
+  # the value must convert to an integer (an integral float or a numeric
+  # string is accepted, anything else raises "not an integer"), and once the
+  # field's `delta` (1900 for year, 1 for month) is removed it must fit a C
+  # `int`, else "out-of-bound". The bound keeps the arithmetic in
+  # `date_fields_to_epoch/1` small: no field can push the result past 64 bits.
+  @c_int_min -2_147_483_648
+  @c_int_max 2_147_483_647
 
-      _ ->
-        raise RuntimeError, value: "field '#{key}' missing in date table for '#{fn_name}'"
+  defp date_field(data, key, delta, default) do
+    case Map.get(data, key) do
+      nil when default == :required ->
+        raise RuntimeError, value: "field '#{key}' missing in date table for 'os.time'"
+
+      nil ->
+        default
+
+      value ->
+        n = field_integer(value, key)
+
+        if n - delta < @c_int_min or n - delta > @c_int_max do
+          raise RuntimeError, value: "field '#{key}' is out-of-bound"
+        end
+
+        n
     end
   end
 
-  defp optional_field(data, key, default) do
-    case Map.get(data, key) do
-      n when is_number(n) -> trunc(n)
-      _ -> default
+  defp field_integer(n, _key) when is_integer(n), do: n
+
+  # A float converts only when it is integral and within the 64-bit range;
+  # NaN (`:nan`) and the huge values standing in for infinity do not.
+  defp field_integer(n, key) when is_float(n) do
+    if n == Float.floor(n) and n >= -9.223372036854776e18 and n < 9.223372036854776e18 do
+      trunc(n)
+    else
+      not_an_integer!(key)
     end
   end
+
+  defp field_integer(str, key) when is_binary(str) do
+    case Value.parse_number(str) do
+      nil -> not_an_integer!(key)
+      n -> field_integer(n, key)
+    end
+  end
+
+  defp field_integer(_other, key), do: not_an_integer!(key)
+
+  defp not_an_integer!(key), do: raise(RuntimeError, value: "field '#{key}' is not an integer")
 
   # Lua 5.3 §6.9: date-table fields need not be within their valid ranges —
   # C mktime normalises them (day = 0 is the last day of the previous month,
   # month = 13 is January of the next year, hour = 25 rolls into the next day).
   # Fold the month into the year, anchor on the 1st of that month, then add the
   # remaining fields as a signed offset in seconds.
-  defp naive_to_epoch(%{year: y, month: mo, day: d, hour: h, minute: mi, second: s}) do
+  defp date_fields_to_epoch(%{year: y, month: mo, day: d, hour: h, minute: mi, second: s}) do
     months = y * 12 + (mo - 1)
     first_of_month = Date.new!(Integer.floor_div(months, 12), Integer.mod(months, 12) + 1, 1)
     base = first_of_month |> DateTime.new!(~T[00:00:00], "Etc/UTC") |> DateTime.to_unix(:second)

@@ -58,6 +58,10 @@ is in the [`1.0.0-rc.0`](#100-rc0---2026-05-26) entry below.
 - `os.time` normalises out-of-range date-table fields the way C `mktime` does
   (e.g. `day = 0` is the last day of the previous month, `month = 13` is
   January of the next year) instead of raising a `MatchError`.
+  Date-table fields are now validated like PUC-Lua's `os.time`: a field that
+  does not convert to an integer raises `field 'X' is not an integer`, and one
+  outside the C `int` range raises `field 'X' is out-of-bound` instead of
+  returning an integer beyond 64 bits.
 
 ## [1.0.2] - 2026-07-28
 
