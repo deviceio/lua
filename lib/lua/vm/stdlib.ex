@@ -167,14 +167,18 @@ defmodule Lua.VM.Stdlib do
 
   # print(...) — prints values separated by tabs, followed by a newline
   defp lua_print(args, state) do
-    {strings, state} =
-      Enum.reduce(args, {[], state}, fn val, {acc, st} ->
+    {strings, _size, state} =
+      Enum.reduce(args, {[], -1, state}, fn val, {acc, size, st} ->
         {str, st} = value_to_string_with_mt(val, st)
-        {[str | acc], st}
+
+        # `size` starts at -1 so the tab before every piece but the first is
+        # counted; the check runs before the line is assembled.
+        size = size + 1 + byte_size(str)
+        Limits.check_string_size!(size, st.max_string_bytes, st)
+        {[str | acc], size, st}
       end)
 
-    output = strings |> Enum.reverse() |> Enum.join("\t")
-    IO.puts(output)
+    strings |> Enum.reverse() |> Enum.intersperse("\t") |> IO.puts()
     {[], state}
   end
 

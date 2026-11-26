@@ -25,6 +25,7 @@ defmodule Lua.VM.Stdlib.Utf8 do
   import Bitwise
 
   alias Lua.VM.ArgumentError
+  alias Lua.VM.Limits
   alias Lua.VM.RuntimeError
   alias Lua.VM.State
   alias Lua.VM.Stdlib.Util
@@ -55,12 +56,17 @@ defmodule Lua.VM.Stdlib.Utf8 do
   # ---------------------------------------------------------------------------
 
   defp utf8_char(args, state) do
-    iolist =
+    {pieces, _size} =
       args
       |> Enum.with_index(1)
-      |> Enum.map(fn {cp, idx} -> encode_one(cp, idx) end)
+      |> Enum.reduce({[], 0}, fn {cp, idx}, {acc, size} ->
+        piece = encode_one(cp, idx)
+        size = size + byte_size(piece)
+        Limits.check_string_size!(size, state.max_string_bytes, state)
+        {[piece | acc], size}
+      end)
 
-    {[IO.iodata_to_binary(iolist)], state}
+    {[pieces |> Enum.reverse() |> IO.iodata_to_binary()], state}
   end
 
   defp encode_one(cp, idx) do

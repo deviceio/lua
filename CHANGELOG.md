@@ -55,6 +55,16 @@ is in the [`1.0.0-rc.0`](#100-rc0---2026-05-26) entry below.
   past the ceiling in a single allocation. Each raises the same catchable
   `"resulting string too large"` error as `string.rep` and `..`, before the
   result is built (#425).
+- `:max_string_bytes` is now also enforced by `print`, `string.char`,
+  `utf8.char` and `debug.traceback`. `print` previously joined all of its
+  arguments into one string with no check, so a script could make a write far
+  larger than the ceiling; it now raises `"resulting string too large"` before
+  anything is written. The documentation of the option now says which strings
+  it does not bound: the `error/2` position prefix, and the one conversion
+  piece `string.format` is building when it refuses.
+- `string.format` reports a bad argument or invalid conversion with its own
+  error again when `:max_string_bytes` is smaller than the conversion's width,
+  instead of `"resulting string too large"`.
 
 ## [1.0.2] - 2026-07-28
 

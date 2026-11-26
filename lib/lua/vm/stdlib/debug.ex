@@ -24,6 +24,7 @@ defmodule Lua.VM.Stdlib.Debug do
   @behaviour Lua.VM.Stdlib.Library
 
   alias Lua.VM.Executor
+  alias Lua.VM.Limits
   alias Lua.VM.State
   alias Lua.VM.Value
 
@@ -168,26 +169,30 @@ defmodule Lua.VM.Stdlib.Debug do
     message = List.first(args)
     _level = Enum.at(args, 1, 1)
 
-    traceback =
-      state.call_stack
-      |> Enum.with_index(1)
-      |> Enum.map(fn {frame, _i} ->
-        source = Executor.frame_source(frame) || "?"
-        line = Executor.frame_line(frame) || 0
-        "\t#{source}:#{line}: in ?"
-      end)
-
     header = "stack traceback:"
-    body = Enum.join([header | traceback], "\n")
 
-    result =
+    prefix =
       if message do
-        "#{Value.to_string(message)}\n#{body}"
+        "#{Value.to_string(message)}\n#{header}"
       else
-        body
+        header
       end
 
-    {[result], state}
+    # A deep stack makes a long traceback, so the size is tracked per frame
+    # and the walk refuses as soon as it passes the ceiling.
+    Limits.check_string_size!(byte_size(prefix), state.max_string_bytes, state)
+
+    {lines, _size} =
+      Enum.reduce(state.call_stack, {[prefix], byte_size(prefix)}, fn frame, {acc, size} ->
+        source = Executor.frame_source(frame) || "?"
+        line = Executor.frame_line(frame) || 0
+        entry = "\n\t#{source}:#{line}: in ?"
+        size = size + byte_size(entry)
+        Limits.check_string_size!(size, state.max_string_bytes, state)
+        {[entry | acc], size}
+      end)
+
+    {[lines |> Enum.reverse() |> IO.iodata_to_binary()], state}
   end
 
   # debug.getmetatable(obj) — returns metatable bypassing __metatable protection

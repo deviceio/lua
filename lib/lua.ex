@@ -102,12 +102,21 @@ defmodule Lua do
         iex> message =~ "stack overflow"
         true
 
-  * `:max_string_bytes` - (default 256 MiB) ceiling for any single string the VM will build,
-    whether via `..`, `string.rep`, `string.format`, `string.gsub`, `string.pack`,
-    `table.concat`, `os.date`, or a `load` reader. An oversized result raises a catchable
+  * `:max_string_bytes` - (default 256 MiB) ceiling for the strings the VM builds from
+    other values, whether via `..`, `string.rep`, `string.format`, `string.gsub`,
+    `string.pack`, `string.char`, `utf8.char`, `table.concat`, `debug.traceback`,
+    `os.date`, or a `load` reader, and for the line `print` writes. An oversized result raises a catchable
     `"resulting string too large"` error — the size is computed *before* allocating, so the
     bomb is refused rather than detected after the fact. Accepts a positive integer or
     `:infinity` for no limit (matching `:max_call_depth` and `:max_instructions`).
+
+    The ceiling is not a cap on every string a script can hold. A string a script already
+    has is never re-checked, and a string that is only a message may go past it by a
+    bounded amount: `error/2` with a string message prepends a `source:line: ` position
+    prefix (the length of the chunk name plus a few bytes) to a message that was itself
+    already within the ceiling, and `string.format` builds the one conversion piece it is
+    working on (at most 99 bytes of padding, or one escaped `%q` argument) before it
+    refuses. Neither grows with the number of arguments or frames.
 
     When running the VM inside a process capped with `:max_heap_size`, set this comfortably
     below the heap cap: the default ceiling permits strings large enough to trip a smaller
