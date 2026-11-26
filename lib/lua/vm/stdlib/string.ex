@@ -296,21 +296,27 @@ defmodule Lua.VM.Stdlib.String do
 
   # string.char(...) - converts byte values to characters
   defp string_char(args, state) do
+    # Every argument is one byte, so the result's size is the argument count.
+    # Validate first (a bad argument keeps its own error), then refuse an
+    # oversized result before building it.
     result =
       args
       |> Enum.with_index(1)
-      |> Enum.reduce_while("", fn {arg, idx}, acc ->
+      |> Enum.find_value(fn {arg, idx} ->
         cond do
-          not is_integer(arg) ->
-            {:halt, {:error, idx, "number expected"}}
-
-          arg < 0 or arg > 255 ->
-            {:halt, {:error, idx, "value out of range"}}
-
-          true ->
-            {:cont, acc <> <<arg>>}
+          not is_integer(arg) -> {:error, idx, "number expected"}
+          arg < 0 or arg > 255 -> {:error, idx, "value out of range"}
+          true -> nil
         end
       end)
+      |> case do
+        nil ->
+          Limits.check_string_size!(length(args), state.max_string_bytes, state)
+          :erlang.list_to_binary(args)
+
+        error ->
+          error
+      end
 
     case result do
       {:error, arg_num, "number expected"} ->
@@ -424,8 +430,8 @@ defmodule Lua.VM.Stdlib.String do
   # ceiling, not after the rest of it has been built. A conversion that makes
   # a fresh binary (width padding, a large `%f`, `%q` escaping) is held in the
   # iolist until the flatten, so the check must come before the next piece is
-  # built. A padded field is at least `width` bytes, which is known before
-  # anything is built, so `%99s` is refused without making the padding.
+  # built. One piece (at most 99 bytes of padding, or an escaped `%q`
+  # argument) can still be built before the call is refused.
   defp render_format([], _args, acc, _argn, _size, _max_bytes) do
     IO.iodata_to_binary(acc)
   end
@@ -444,7 +450,6 @@ defmodule Lua.VM.Stdlib.String do
   end
 
   defp render_format([{:spec, spec} | rest], [arg | remaining_args], acc, argn, size, max_bytes) do
-    Limits.check_string_size!(size + padded_width(spec), max_bytes)
     piece = apply_format_spec(spec, arg)
     size = size + piece_size(piece)
     Limits.check_string_size!(size, max_bytes)
@@ -563,11 +568,6 @@ defmodule Lua.VM.Stdlib.String do
   # corrupt that literal, so %q never threads through the width/sign machinery
   # (PUC-Lua likewise refuses to apply modifiers to %q). Every other conversion
   # takes the padding pipeline below.
-  # Lower bound on a conversion's output from its width alone, known before the
-  # padding is built. %q ignores width, so it contributes nothing.
-  defp padded_width({_flags, _width, _precision, ?q}), do: 0
-  defp padded_width({_flags, width, _precision, _specifier}), do: width || 0
-
   defp apply_format_spec({_flags, _width, _precision, ?q}, arg) do
     format_quoted(arg)
   end
