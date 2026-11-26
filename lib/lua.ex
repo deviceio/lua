@@ -1135,6 +1135,50 @@ defmodule Lua do
   end
 
   @doc """
+  Sets the instant after which Lua code running on `lua` raises a catchable
+  `"deadline exceeded"` error, as a `System.monotonic_time(:millisecond)`
+  value, or `:infinity` for none (the default). `:passed` is what `deadline/1`
+  returns once Lua has found the deadline passed; it is accepted so a value
+  read with `deadline/1` can always be set back.
+
+  The deadline is checked at loop back-edges and call boundaries, every few
+  hundred of them, like the `:max_instructions` budget. It is a soft limit:
+  the clock is read once per stride of those, not on every one, and nothing
+  bounds how long the work between two of them takes. Elixir functions Lua
+  calls are not interrupted while they run, and neither are the Lua callbacks
+  the standard library runs (a `string.gsub` replacement function, a
+  `table.sort` comparator) nor pattern matching and `string.rep`. A host that
+  needs a hard limit on untrusted code must run the evaluation in a process it
+  can kill.
+
+  Once Lua finds the deadline passed it stays passed on the state the
+  evaluation returns, and every later evaluation on that state raises again at
+  its first loop iteration or call, until the host sets a new deadline. A
+  `pcall` traps the error, and the protected call's result is returned
+  normally when nothing that ticks follows it (`return pcall(f)` returns
+  `false` and the message), but any further loop or call raises again.
+
+  It is the deadline a `lua_sethook` count hook gives a host in reference Lua:
+  a host calling back into Lua from an Elixir function can give that call a
+  shorter deadline, and restore the previous one with `deadline/1` once it
+  returns, so only the callback fails.
+
+      iex> lua = Lua.new() |> Lua.set_deadline(System.monotonic_time(:millisecond))
+      iex> {[false, message], _lua} = Lua.eval!(lua, "return pcall(function() while true do end end)")
+      iex> message =~ "deadline exceeded"
+      true
+  """
+  @spec set_deadline(t(), integer() | :infinity | :passed) :: t()
+  def set_deadline(%__MODULE__{state: state} = lua, deadline)
+      when is_integer(deadline) or deadline in [:infinity, :passed] do
+    %{lua | state: %{state | deadline: deadline}}
+  end
+
+  @doc "Returns the deadline set with `set_deadline/2`, `:infinity`, or `:passed` once Lua found it passed."
+  @spec deadline(t()) :: integer() | :infinity | :passed
+  def deadline(%__MODULE__{state: state}), do: state.deadline
+
+  @doc """
   Puts a private value in storage for use in Elixir functions
 
       iex> Lua.new() |> Lua.put_private(:api_key, "1234")
