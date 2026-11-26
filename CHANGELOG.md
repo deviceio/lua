@@ -50,6 +50,20 @@ is in the [`1.0.0-rc.0`](#100-rc0---2026-05-26) entry below.
 ## [Unreleased]
 
 ### Fixed
+- `#` on a value with no length (`nil`, a boolean, a number, a function) now
+  raises `attempt to get length of a <type> value`, as Lua 5.3 does, instead of
+  returning `0`. Scripts that relied on `#nil == 0` now fail; guard with
+  `x and #x or 0`.
+- NaN is a number across the boundary: `type(0/0)` is `"number"`,
+  `math.type(0/0)` is `"float"`, `tostring(0/0)` is `"nan"`, and
+  `Lua.decode!/2` returns `:nan` instead of raising. The Elixir atom `:nan`
+  passed to `Lua.set!/3` or `Lua.encode!/2` now becomes a NaN number rather than
+  the string `"nan"`.
+- Map keys `true` and `false` passed to `Lua.set!/3` stay booleans. Previously
+  they became the strings `"true"` and `"false"`, so a script that read
+  `t["true"]` must now read `t[true]`.
+- `Lua.set!/3` raises a `Lua.RuntimeException` (`Failed to encode ...`) for a
+  value it cannot encode, such as a pid, instead of a bare `FunctionClauseError`.
 - `:max_string_bytes` is now enforced by `table.concat`, `string.gsub`,
   `string.format`, `string.pack` and `os.date`, which previously built results
   past the ceiling in a single allocation. Each raises the same catchable

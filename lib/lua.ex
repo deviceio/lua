@@ -353,7 +353,7 @@ defmodule Lua do
       if Util.encoded?(value) do
         {value, lua.state}
       else
-        Value.encode(value, lua.state, &wrap_callback(&1, function_name, scope))
+        encode_value!(value, lua.state, &wrap_callback(&1, function_name, scope))
       end
 
     state = do_set_nested(state, keys, encoded)
@@ -985,6 +985,9 @@ defmodule Lua do
   @doc """
   Encodes a Lua value into its internal form
 
+  The atom `:nan` encodes to Lua's NaN number (and decodes back to `:nan`), so
+  it is a number in Lua, not the string `"nan"`.
+
       <!-- Old Luerl implementation returned specific tref IDs: {encoded, _} = Lua.encode!(Lua.new(), %{a: 1}); encoded => {:tref, 14} -->
 
       iex> {encoded, _} = Lua.encode!(Lua.new(), %{a: 1})
@@ -1000,6 +1003,10 @@ defmodule Lua do
     {nil, lua}
   end
 
+  def encode!(%__MODULE__{} = lua, :nan) do
+    {:nan, lua}
+  end
+
   def encode!(%__MODULE__{} = lua, value) when is_atom(value) and not is_boolean(value) do
     {Atom.to_string(value), lua}
   end
@@ -1010,14 +1017,15 @@ defmodule Lua do
     if Util.encoded?(value) do
       {value, lua}
     else
-      {encoded, state} = Value.encode(value, state, &wrap_callback(&1, :anonymous, []))
+      {encoded, state} = encode_value!(value, state, &wrap_callback(&1, :anonymous, []))
       {encoded, %{lua | state: state}}
     end
-  rescue
-    _e in [ArgumentError] ->
-      reraise Lua.RuntimeException, "Failed to encode #{inspect(value)}", __STACKTRACE__
+  end
 
-    _e in [FunctionClauseError] ->
+  defp encode_value!(value, state, fun_wrapper) do
+    Value.encode(value, state, fun_wrapper)
+  rescue
+    _e in [ArgumentError, FunctionClauseError] ->
       reraise Lua.RuntimeException, "Failed to encode #{inspect(value)}", __STACKTRACE__
   end
 
