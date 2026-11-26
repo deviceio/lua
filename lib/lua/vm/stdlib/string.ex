@@ -342,7 +342,7 @@ defmodule Lua.VM.Stdlib.String do
     # `argn` is the 1-based position of the next value argument. The format
     # string is arg #1, so the first conversion consumes arg #2; PUC reports a
     # missing value against this index ("bad argument #2 ... (no value)").
-    {[render_format(segments, args, [], 2)], state}
+    {[render_format(segments, args, [], 2, 0, state.max_string_bytes)], state}
   rescue
     e in Lua.VM.RuntimeError ->
       reraise e, __STACKTRACE__
@@ -418,26 +418,56 @@ defmodule Lua.VM.Stdlib.String do
   # Render compiled segments against the argument list. `acc` is an iolist
   # appended as `[acc, piece]` (O(1) per step), materialized exactly once via
   # `IO.iodata_to_binary/1` at the base case.
-  defp render_format([], _args, acc, _argn), do: IO.iodata_to_binary(acc)
-
-  defp render_format([{:lit, literal} | rest], args, acc, argn) do
-    render_format(rest, args, [acc, literal], argn)
+  #
+  # `size` is the iolist's running byte count, checked against `max_bytes` in
+  # every clause so a call is refused as soon as its output passes the
+  # ceiling, not after the rest of it has been built. A conversion that makes
+  # a fresh binary (width padding, a large `%f`, `%q` escaping) is held in the
+  # iolist until the flatten, so the check must come before the next piece is
+  # built. A padded field is at least `width` bytes, which is known before
+  # anything is built, so `%99s` is refused without making the padding.
+  defp render_format([], _args, acc, _argn, _size, _max_bytes) do
+    IO.iodata_to_binary(acc)
   end
 
-  defp render_format([{:bare, c} | rest], [arg | remaining_args], acc, argn) do
-    render_format(rest, remaining_args, [acc, convert_raw(c, arg, nil, 0, nil)], argn + 1)
+  defp render_format([{:lit, literal} | rest], args, acc, argn, size, max_bytes) do
+    size = size + byte_size(literal)
+    Limits.check_string_size!(size, max_bytes)
+    render_format(rest, args, [acc, literal], argn, size, max_bytes)
   end
 
-  defp render_format([{:spec, spec} | rest], [arg | remaining_args], acc, argn) do
-    render_format(rest, remaining_args, [acc, apply_format_spec(spec, arg)], argn + 1)
+  defp render_format([{:bare, c} | rest], [arg | remaining_args], acc, argn, size, max_bytes) do
+    piece = convert_raw(c, arg, nil, 0, nil)
+    size = size + piece_size(piece)
+    Limits.check_string_size!(size, max_bytes)
+    render_format(rest, remaining_args, [acc, piece], argn + 1, size, max_bytes)
   end
 
-  defp render_format([_segment | _], [], _acc, argn) do
+  defp render_format([{:spec, spec} | rest], [arg | remaining_args], acc, argn, size, max_bytes) do
+    Limits.check_string_size!(size + padded_width(spec), max_bytes)
+    piece = apply_format_spec(spec, arg)
+    size = size + piece_size(piece)
+    Limits.check_string_size!(size, max_bytes)
+    render_format(rest, remaining_args, [acc, piece], argn + 1, size, max_bytes)
+  end
+
+  defp render_format([_segment | _], [], _acc, argn, _size, _max_bytes) do
     raise ArgumentError,
       function_name: "string.format",
       arg_num: argn,
       details: "no value"
   end
+
+  # A conversion is a binary unless width padding made it a short list of
+  # binaries (see apply_width_flags/3); those shapes are sized here without
+  # a BIF call per piece.
+  defp piece_size(piece) when is_binary(piece), do: byte_size(piece)
+  defp piece_size([a, b]) when is_binary(a) and is_binary(b), do: byte_size(a) + byte_size(b)
+
+  defp piece_size([a, b, c]) when is_binary(a) and is_binary(b) and is_binary(c),
+    do: byte_size(a) + byte_size(b) + byte_size(c)
+
+  defp piece_size(piece), do: IO.iodata_length(piece)
 
   # PUC-Lua's `scanformat` reads at most two width and two precision digits and
   # errors on a third. Mirror that with a digit-count limit (not a value limit)
@@ -533,6 +563,11 @@ defmodule Lua.VM.Stdlib.String do
   # corrupt that literal, so %q never threads through the width/sign machinery
   # (PUC-Lua likewise refuses to apply modifiers to %q). Every other conversion
   # takes the padding pipeline below.
+  # Lower bound on a conversion's output from its width alone, known before the
+  # padding is built. %q ignores width, so it contributes nothing.
+  defp padded_width({_flags, _width, _precision, ?q}), do: 0
+  defp padded_width({_flags, width, _precision, _specifier}), do: width || 0
+
   defp apply_format_spec({_flags, _width, _precision, ?q}, arg) do
     format_quoted(arg)
   end
@@ -1173,7 +1208,7 @@ defmodule Lua.VM.Stdlib.String do
 
       # Return an iolist rather than concatenating with `<>`: the padded
       # result threads through the `[acc, piece]` accumulator in
-      # `render_format/3` and is materialised exactly once at that function's
+      # `render_format/6` and is materialised exactly once at that function's
       # base case via `IO.iodata_to_binary/1`, so each width-flagged specifier
       # no longer allocates a fresh padded binary.
       if minus? do
@@ -1229,7 +1264,7 @@ defmodule Lua.VM.Stdlib.String do
 
   # string.pack(fmt, v1, v2, ...) — pack values per fmt
   defp string_pack([fmt | args], state) when is_binary(fmt) do
-    {[Pack.pack(fmt, args)], state}
+    {[Pack.pack(fmt, args, state.max_string_bytes)], state}
   end
 
   defp string_pack([other | _], _state), do: raise_string_expected(1, "pack", other)
