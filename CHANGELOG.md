@@ -63,7 +63,8 @@ is in the [`1.0.0-rc.0`](#100-rc0---2026-05-26) entry below.
   Their results, and the values of a further suspend, are decoded under
   a `:decode` option (default `true`), as `eval!` does.
   Heap effects made before a suspend are kept, as are effects made
-  before a post-resume error (matching `pcall` semantics), and a
+  before a post-resume error (matching `pcall` semantics) while the call
+  frames of the failed evaluation are dropped, and a
   `:max_instructions` budget spans the whole suspend/resume cycle. A
   suspend that cannot be resumed — across a `pcall`/`xpcall` boundary, an
   operator metamethod (`__add` and the other arithmetic and bitwise

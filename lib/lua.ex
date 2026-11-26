@@ -926,7 +926,7 @@ defmodule Lua do
         # programmatic boundary (no Lua machine around it): resume
         # returns the resume values as the call results.
         nil ->
-          {:suspended, e.values, %Continuation{layers: [%{engine: :pending_call}]}, e.state || recover_state(e, state)}
+          {:suspended, e.values, Continuation.new([%{engine: :pending_call}], state), e.state || recover_state(e, state)}
 
         # The native re-entered Lua and the inner machine suspended — a
         # re-entrant boundary that cannot be resumed from here.
@@ -959,7 +959,7 @@ defmodule Lua do
           {:error, RuntimeError.exception(value: Suspend.boundary_message(), state: e.state), recover_state(e, state)}
 
         layers ->
-          {:suspended, e.values, %Continuation{layers: layers}, e.state || recover_state(e, state)}
+          {:suspended, e.values, Continuation.new(layers, state), e.state || recover_state(e, state)}
       end
 
     e ->
@@ -978,7 +978,7 @@ defmodule Lua do
           {:error, RuntimeError.exception(value: Suspend.boundary_message(), state: e.state), recover_state(e, state)}
 
         layers ->
-          {:suspended, e.values, %Continuation{layers: layers}, e.state || recover_state(e, state)}
+          {:suspended, e.values, Continuation.new(layers, state), e.state || recover_state(e, state)}
       end
 
     e ->
@@ -1123,17 +1123,18 @@ defmodule Lua do
 
       {:suspended, values, layers, new_state} ->
         {:suspended, decode_results(values, new_state, decode?),
-         %{lua | state: new_state, continuation: %Continuation{layers: layers}}}
+         %{lua | state: new_state, continuation: %{continuation | layers: layers}}}
     end
   rescue
     # A host-facing exception raised after the resume (a callback returning
     # invalid data, a failing nested `eval!`) comes back in the error tuple
     # as it is, as `call_function/3` returns it, instead of escaping.
     e in [Lua.RuntimeException, Lua.CompilerException] ->
-      {:error, e, %{lua | state: recover_state(e, lua.state), continuation: nil}}
+      {:error, e, %{lua | state: recover_state(e, Continuation.unwind(lua.state, continuation)), continuation: nil}}
 
     e ->
-      {:error, Lua.RuntimeException.exception(e), %{lua | state: recover_state(e, lua.state), continuation: nil}}
+      {:error, Lua.RuntimeException.exception(e),
+       %{lua | state: recover_state(e, Continuation.unwind(lua.state, continuation)), continuation: nil}}
   end
 
   # The same result treatment `eval!/3` gives its results and suspend values.

@@ -41,9 +41,47 @@ defmodule Lua.VM.Continuation do
 
   alias Lua.VM.State
 
-  defstruct [:layers]
+  defstruct [:layers, :entry]
 
-  @type t :: %__MODULE__{layers: [map()]}
+  @typedoc """
+  The control state of the evaluation's entry point: the call frames and
+  open upvalues the host's `%Lua{}` had before the suspended evaluation
+  started. A failed resume unwinds back to it (see `unwind/2`).
+  """
+  @type entry :: %{call_stack: list(), call_depth: non_neg_integer(), open_upvalues: term()}
+
+  @type t :: %__MODULE__{layers: [map()], entry: entry() | nil}
+
+  @doc """
+  Captures the control state of `state`, the state an evaluation is entered
+  with, for `new/2`.
+  """
+  @spec entry(State.t()) :: entry()
+  def entry(%State{} = state) do
+    %{call_stack: state.call_stack, call_depth: state.call_depth, open_upvalues: state.open_upvalues}
+  end
+
+  @doc """
+  Builds a continuation over `layers` that remembers the entry control state
+  of `state`.
+  """
+  @spec new([map()], State.t()) :: t()
+  def new(layers, %State{} = state), do: %__MODULE__{layers: layers, entry: entry(state)}
+
+  @doc """
+  Restores the evaluation's entry call frames and open upvalues on `state`.
+
+  A suspended `%Lua{}` carries the call frames of the function the machine
+  was parked in. When a resume fails, those frames belong to a computation
+  that no longer exists, so they are dropped; heap fields are untouched.
+  A continuation with no recorded entry leaves `state` as it is.
+  """
+  @spec unwind(State.t(), t()) :: State.t()
+  def unwind(%State{} = state, %__MODULE__{entry: %{call_stack: cs, call_depth: cd, open_upvalues: ou}}) do
+    %{state | call_stack: cs, call_depth: cd, open_upvalues: ou}
+  end
+
+  def unwind(%State{} = state, %__MODULE__{}), do: state
 
   @doc """
   Runs the continuation until it completes or suspends again.

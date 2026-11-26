@@ -387,6 +387,65 @@ defmodule Lua.SuspendResumeTest do
     end
   end
 
+  describe "a failed resume" do
+    defp low_depth, do: yielder(Lua.new(max_call_depth: 1))
+
+    defp assert_fresh_frames(lua) do
+      # Repeated evals under a one-frame call limit would overflow if the
+      # parked call frames were still on the returned state.
+      for _ <- 1..3 do
+        assert {[1], _} = Lua.eval!(lua, "local function g() return 1 end return g()")
+      end
+
+      assert lua.state.call_stack == Lua.new().state.call_stack
+      assert lua.state.call_depth == Lua.new().state.call_depth
+    end
+
+    test "raising inside a nested function drops the parked call frames" do
+      {:suspended, _, lua} =
+        Lua.eval!(low_depth(), "local function f() yield(1) error('boom') end f()")
+
+      assert {:error, %Lua.RuntimeException{}, lua} = Lua.resume(lua, [])
+      assert lua.continuation == nil
+      assert_fresh_frames(lua)
+    end
+
+    test "raising in the main chunk leaves no frames" do
+      {:suspended, _, lua} = Lua.eval!(low_depth(), "yield(1) error('boom')")
+
+      assert {:error, %Lua.RuntimeException{}, lua} = Lua.resume(lua, [])
+      assert_fresh_frames(lua)
+    end
+
+    test "raising after a second suspend in a nested function drops the frames" do
+      {:suspended, _, lua} =
+        Lua.eval!(low_depth(), "local function f() yield(1) yield(2) error('boom') end f()")
+
+      assert {:suspended, [2], lua} = Lua.resume(lua, [])
+      assert {:error, %Lua.RuntimeException{}, lua} = Lua.resume(lua, [])
+      assert_fresh_frames(lua)
+    end
+
+    test "a callback that raises on resume drops the frames of a call_function evaluation" do
+      lua = low_depth()
+
+      {[f], lua} =
+        Lua.eval!(lua, "return function() yield(1) error('boom') end", decode: false)
+
+      assert {:suspended, [1], lua} = Lua.call_function(lua, f, [])
+      assert {:error, %Lua.RuntimeException{}, lua} = Lua.resume(lua, [])
+      assert_fresh_frames(lua)
+    end
+
+    test "keeps heap effects made before the error" do
+      {:suspended, _, lua} =
+        Lua.eval!(low_depth(), "local function f() yield(1) seen = 7 error('boom') end f()")
+
+      assert {:error, _, lua} = Lua.resume(lua, [])
+      assert {[7], _} = Lua.eval!(lua, "return seen")
+    end
+  end
+
   describe "deflua" do
     test "deflua can suspend without threading state" do
       lua = Lua.load_api(Lua.new(), Scheduler)

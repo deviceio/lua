@@ -73,7 +73,7 @@ defmodule Lua.VM do
             Suspend.raise_boundary!(e, fallback_state: state)
 
           layers ->
-            {:suspended, e.values, %Continuation{layers: layers}, e.state || state}
+            {:suspended, e.values, Continuation.new(layers, state), e.state || state}
         end
     end
   end
