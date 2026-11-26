@@ -196,8 +196,9 @@ deliberate non-goal rather than a missing feature:
   enable it explicitly: `Lua.set_lua_paths/2` configures where `require`
   resolves modules on disk, and `Lua.load_file!/2` loads a Lua file from the
   host.
-- **Coroutines**, **garbage collection / weak tables**, and the **full
-  `debug` library**.
+- **Coroutines**, **weak tables** and **`__gc` finalizers**, and the **full
+  `debug` library**. Garbage collection exists only between host calls: see
+  `Lua.gc/2`. `collectgarbage()` inside a script is still a no-op.
 
 For the live Lua 5.3 official test-suite pass count and the rationale behind
 each deferral, see the

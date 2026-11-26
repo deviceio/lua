@@ -49,6 +49,31 @@ is in the [`1.0.0-rc.0`](#100-rc0---2026-05-26) entry below.
 
 ## [Unreleased]
 
+### Added
+- `Lua.gc/2` frees tables, closure cells and userdata that Lua can no longer
+  reach, using a generational mark-and-sweep collector. Call it between
+  evaluations or `Lua.call_function/3` calls on a long-lived state; the default
+  `:auto` mode does nothing until enough objects have been allocated. Roots
+  are `_G`, metatables, private values and `:keep`; a table or function
+  reference held only by Elixir code may dangle after a collection unless it is
+  passed in `:keep`.
+- `Lua.gc_reentrant/2` wraps a call that a host serves from inside an Elixir
+  callback, and frees what that call allocated once it returns. A caught error
+  after the call (`pcall`, `xpcall`, or the error path of `Lua.call_function/3`)
+  keeps the collector's bookkeeping, so a later minor collection does not free
+  a table or closure cell that is still in use.
+
+### Changed
+- Writes to an existing table now go through `Lua.VM.State.put_table/3`, which
+  records the write for the collector. This is on the dispatcher's field-write
+  path and has not been benchmarked yet.
+
+### Known limitations
+- Tables with a `__mode` metatable field are traced as strong tables, so weak
+  keys and values are never cleared, and `__gc` finalizers never run.
+- Collection only runs between host calls. A single evaluation that allocates
+  without bound still grows, and `collectgarbage()` inside Lua stays a no-op.
+
 ### Fixed
 - `:max_string_bytes` is now enforced by `table.concat`, `string.gsub`,
   `string.format`, `string.pack` and `os.date`, which previously built results

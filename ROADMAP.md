@@ -32,7 +32,7 @@ not add new public surface in the release that freezes the surface.
   rewrite already meets or beats Luerl where it counts (native VM,
   structured errors, `parse_structured/1`, `:max_instructions`, O(1)
   `#t`/`pairs`); the dimensions we trail (coroutines, full `io`,
-  gc/weak-tables) are documented deliberate non-goals, not gaps. Four
+  weak tables and `__gc`) are documented deliberate non-goals, not gaps. Four
   milestone issues were already satisfied by rc.3 and closed (#77, #89,
   #92, and #87, the latter moot post-Luerl).
 - **1.1.0** — additive DX + virtualization plumbing on the frozen API:
@@ -242,7 +242,9 @@ lives alongside the `@deferred_permanent` map in
 Other deferrals in this milestone:
 
 - **Coroutines** (`coroutine.lua`) — full continuation/process model, weeks of work.
-- **Garbage collection / weak tables** (`gc.lua`).
+- **Weak tables, `__gc` finalizers and in-script `collectgarbage`** (`gc.lua`). A
+  generational collector runs between host calls (`Lua.gc/2`); it treats weak
+  tables as strong and never runs finalizers.
 - **Full debug library** (`db.lua`).
 - **C-stack tests** (`cstack.lua`).
 - **Backward `goto` and goto-out-of-conditional** (3 skipped unit tests in
