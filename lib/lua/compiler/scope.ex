@@ -5,6 +5,7 @@ defmodule Lua.Compiler.Scope do
   alias Lua.AST.Chunk
   alias Lua.AST.Expr
   alias Lua.AST.Statement
+  alias Lua.AST.Walker
 
   @type var_ref ::
           {:register, index :: non_neg_integer()}
@@ -49,6 +50,7 @@ defmodule Lua.Compiler.Scope do
               locals: %{},
               parent_scopes: [],
               captured_locals: MapSet.new(),
+              loop_captures: nil,
               block_path: [],
               block_counter: 0
 
@@ -60,6 +62,7 @@ defmodule Lua.Compiler.Scope do
             locals: %{optional(binary()) => non_neg_integer()},
             parent_scopes: [%{locals: map(), function: term()}],
             captured_locals: MapSet.t(),
+            loop_captures: nil | :trial | MapSet.t(),
             block_path: [non_neg_integer()],
             block_counter: non_neg_integer()
           }
@@ -133,8 +136,68 @@ defmodule Lua.Compiler.Scope do
     {:ok, state}
   end
 
-  defp resolve_block(%Block{stmts: stmts}, state) do
-    Enum.reduce(stmts, state, &resolve_statement/2)
+  defp resolve_block(%Block{stmts: stmts} = block, state) do
+    resolve_stmts = fn state -> Enum.reduce(stmts, state, &resolve_block_statement/2) end
+
+    # A block holding a label can be re-entered by a backward `goto`, so every
+    # captured name counts for the whole block, whichever local it names.
+    if Enum.any?(stmts, &match?(%Statement.Label{}, &1)) and contains_function?(block) do
+      with_loop_captures(state, :all, resolve_stmts)
+    else
+      resolve_stmts.(state)
+    end
+  end
+
+  # A loop body runs more than once, so a local declared outside the loop can
+  # be written there before a closure later in the body (or in a later
+  # iteration) captures it. A plain register write made at that point would
+  # miss the cell the first closure opened. Which names get captured is only
+  # known after the body has been resolved, so a loop that contains a function
+  # is resolved once to find them and again with them already marked.
+  defp resolve_block_statement(%stmt_type{} = stmt, state)
+       when stmt_type in [Statement.While, Statement.Repeat, Statement.ForNum, Statement.ForIn] do
+    if contains_function?(stmt) do
+      with_loop_captures(state, {:visible, Map.keys(state.locals)}, &resolve_statement(stmt, &1))
+    else
+      resolve_statement(stmt, state)
+    end
+  end
+
+  defp resolve_block_statement(stmt, state), do: resolve_statement(stmt, state)
+
+  # `scope` is `:all`, or `{:visible, names}`: the locals declared outside the
+  # loop. Locals declared inside the body get a fresh slot, and a closed cell,
+  # on every iteration, so they need no early marking.
+  defp with_loop_captures(%{loop_captures: :trial} = state, _scope, resolve), do: resolve.(state)
+
+  defp with_loop_captures(%{loop_captures: nil} = state, scope, resolve) do
+    trial = resolve.(%{state | loop_captures: :trial})
+    state = run_with_loop_captures(state, trial.captured_locals, scope, resolve)
+    %{state | loop_captures: nil}
+  end
+
+  defp with_loop_captures(%{loop_captures: captures} = state, scope, resolve) do
+    state = run_with_loop_captures(state, captures, scope, resolve)
+    %{state | loop_captures: captures}
+  end
+
+  defp run_with_loop_captures(state, captures, scope, resolve) do
+    marked =
+      case scope do
+        :all -> captures
+        {:visible, names} -> MapSet.intersection(captures, MapSet.new(names))
+      end
+
+    resolve.(%{state | loop_captures: captures, captured_locals: MapSet.union(state.captured_locals, marked)})
+  end
+
+  defp contains_function?(node) do
+    Walker.reduce(node, false, fn
+      %Expr.Function{}, _acc -> true
+      %Statement.FuncDecl{}, _acc -> true
+      %Statement.LocalFunc{}, _acc -> true
+      _node, acc -> acc
+    end)
   end
 
   # Per Lua 5.3 §3.3.4, each control-flow block (then/else, while/repeat
@@ -682,6 +745,7 @@ defmodule Lua.Compiler.Scope do
     saved_function = state.current_function
     saved_parent_scopes = state.parent_scopes
     saved_captured_locals = state.captured_locals
+    saved_loop_captures = state.loop_captures
 
     # Push current scope onto parent_scopes for upvalue resolution
     parent_scope_entry = %{locals: state.locals, function: state.current_function}
@@ -711,6 +775,9 @@ defmodule Lua.Compiler.Scope do
         # in a loop can then never reuse an open cell that a plain register
         # write to `_ENV` did not update.
         captured_locals: MapSet.new(["_ENV"]),
+        # A trial pass only collects captured names, so it never needs the
+        # nested function's own trial passes.
+        loop_captures: if(saved_loop_captures == :trial, do: :trial),
         block_path: []
     }
 
@@ -756,6 +823,7 @@ defmodule Lua.Compiler.Scope do
         current_function: saved_function,
         parent_scopes: saved_parent_scopes,
         captured_locals: MapSet.union(saved_captured_locals, newly_captured),
+        loop_captures: saved_loop_captures,
         block_path: saved_block_path
     }
   end
