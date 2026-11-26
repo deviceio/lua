@@ -25,6 +25,26 @@ defmodule LuaTest do
     end
   end
 
+  describe "set! with a decoded table" do
+    test "refuses a nested decoded table with a clear error" do
+      {[decoded], _} = Lua.eval!(Lua.new(), "return {a = {b = 1}}")
+
+      assert_raise Lua.RuntimeException, ~r/list of \{key, value\} pairs/, fn ->
+        Lua.set!(Lua.new(), [:t], decoded)
+      end
+
+      assert_raise Lua.RuntimeException, ~r/list of \{key, value\} pairs/, fn ->
+        Lua.set!(Lua.new(), [:t], Map.new(decoded))
+      end
+    end
+
+    test "a table evaluated with decode: false round-trips into set!" do
+      {[ref], lua} = Lua.eval!(Lua.new(), "return {a = {b = 1}}", decode: false)
+
+      assert {[1], _} = lua |> Lua.set!([:t], ref) |> Lua.eval!("return t.a.b")
+    end
+  end
+
   describe "inspect" do
     test "shows nothing" do
       lua = Lua.new()
