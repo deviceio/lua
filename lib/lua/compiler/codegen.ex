@@ -776,7 +776,19 @@ defmodule Lua.Compiler.Codegen do
               {instrs, ctx}
 
             {:captured_local, local_reg} ->
-              {[Instruction.set_open_upvalue(local_reg, closure_reg)], ctx}
+              # Write the register as well: set_open_upvalue is a no-op until a
+              # cell exists, and a later closure captures the register's value.
+              instrs =
+                if local_reg == closure_reg do
+                  [Instruction.set_open_upvalue(local_reg, closure_reg)]
+                else
+                  [
+                    Instruction.move(local_reg, closure_reg),
+                    Instruction.set_open_upvalue(local_reg, closure_reg)
+                  ]
+                end
+
+              {instrs, ctx}
 
             {:upvalue, index} ->
               {[Instruction.set_upvalue(index, closure_reg)], ctx}

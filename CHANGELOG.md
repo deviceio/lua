@@ -55,6 +55,11 @@ is in the [`1.0.0-rc.0`](#100-rc0---2026-05-26) entry below.
   past the ceiling in a single allocation. Each raises the same catchable
   `"resulting string too large"` error as `string.rep` and `..`, before the
   result is built (#425).
+- A local captured by a closure no longer goes stale when it is written inside
+  a `for`, `while`, `repeat` or `goto` loop before the closure is created: the
+  write now reaches the closure's cell, so the closure reads the new value like
+  PUC-Lua does (`local x; for i=1,2 do x=i; fns[i]=function() return x end end`
+  printed `1,1` instead of `1,2`).
 
 ## [1.0.2] - 2026-07-28
 
