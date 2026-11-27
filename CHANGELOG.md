@@ -55,6 +55,8 @@ is in the [`1.0.0-rc.0`](#100-rc0---2026-05-26) entry below.
   past the ceiling in a single allocation. Each raises the same catchable
   `"resulting string too large"` error as `string.rep` and `..`, before the
   result is built (#425).
+- `math.random` and `math.randomseed` use a generator kept in the VM state, so
+  a script can no longer reseed or draw from the host process's `:rand` state.
 
 ## [1.0.2] - 2026-07-28
 

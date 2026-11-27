@@ -65,7 +65,10 @@ defmodule Lua.VM.State do
             # scanned and spec-parsed once, not every call. Threaded in the
             # struct (not ETS/process dictionary) to preserve value semantics;
             # bounded in `Lua.VM.Stdlib.String`.
-            format_cache: %{}
+            format_cache: %{},
+            # Seeded on first draw: a seed set here would be shared by every
+            # VM built from the memoized bootstrap template.
+            rand_state: nil
 
   @type t :: %__MODULE__{
           call_stack: list(),
@@ -83,7 +86,8 @@ defmodule Lua.VM.State do
           private: map(),
           multi_return_count: non_neg_integer(),
           g_ref: nil | {:tref, non_neg_integer()},
-          format_cache: %{optional(binary()) => list()}
+          format_cache: %{optional(binary()) => list()},
+          rand_state: :rand.state() | nil
         }
 
   @doc """
@@ -173,6 +177,7 @@ defmodule Lua.VM.State do
   | `tables`, `table_next_id`              | `call_stack`, `call_depth`      |
   | `userdata`, `userdata_next_id`         | `open_upvalues`                 |
   | `metatables`, `upvalue_cells`, `private` | `multi_return_count`          |
+  | `rand_state`                           |                                 |
 
   The instruction tally `instruction_count` is also carried forward (monotonic max), not
   reset to the entry value: the work a protected call burned must still count
@@ -200,6 +205,7 @@ defmodule Lua.VM.State do
         metatables: raised.metatables,
         upvalue_cells: raised.upvalue_cells,
         private: raised.private,
+        rand_state: raised.rand_state,
         instruction_count: max(entry.instruction_count, raised.instruction_count)
     }
   end

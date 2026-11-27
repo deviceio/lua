@@ -429,13 +429,13 @@ defmodule Lua.VM.Stdlib.Math do
 
   # math.random([m [, n]])
   defp math_random([], state) do
-    # Returns a float in [0, 1)
-    {[:rand.uniform()], state}
+    {float, rand_state} = :rand.uniform_s(generator(state))
+    {[float], %{state | rand_state: rand_state}}
   end
 
   defp math_random([m], state) when is_integer(m) and m > 0 do
-    # Returns an integer in [1, m]
-    {[:rand.uniform(m)], state}
+    {integer, rand_state} = :rand.uniform_s(m, generator(state))
+    {[integer], %{state | rand_state: rand_state}}
   end
 
   # Lua 5.3 §6.7: the interval `[m, n]` is too large when its span `n - m`
@@ -449,9 +449,8 @@ defmodule Lua.VM.Stdlib.Math do
   end
 
   defp math_random([m, n], state) when is_integer(m) and is_integer(n) and m <= n do
-    # Returns an integer in [m, n]
-    range = n - m + 1
-    {[m + :rand.uniform(range) - 1], state}
+    {offset, rand_state} = :rand.uniform_s(n - m + 1, generator(state))
+    {[m + offset - 1], %{state | rand_state: rand_state}}
   end
 
   defp math_random([m, n | _], _state) when is_integer(m) and is_integer(n) do
@@ -478,13 +477,11 @@ defmodule Lua.VM.Stdlib.Math do
 
   # math.randomseed(x [, y])
   defp math_randomseed([x], state) when is_integer(x) do
-    :rand.seed(:exsss, {x, 0, 0})
-    {[], state}
+    {[], seed_generator(state, {x, 0, 0})}
   end
 
   defp math_randomseed([x, y], state) when is_integer(x) and is_integer(y) do
-    :rand.seed(:exsss, {x, y, 0})
-    {[], state}
+    {[], seed_generator(state, {x, y, 0})}
   end
 
   defp math_randomseed([x, y | _], _state) when is_integer(x) do
@@ -505,6 +502,16 @@ defmodule Lua.VM.Stdlib.Math do
 
   defp math_randomseed([], _state) do
     raise ArgumentError.value_expected("math.randomseed", 1)
+  end
+
+  defp seed_generator(state, seed), do: %{state | rand_state: :rand.seed_s(:exsss, seed)}
+
+  defp generator(%State{rand_state: nil}), do: :rand.seed_s(:exsss, unpredictable_seed())
+  defp generator(%State{rand_state: rand_state}), do: rand_state
+
+  defp unpredictable_seed do
+    <<a::64, b::64, c::64>> = :crypto.strong_rand_bytes(24)
+    {a, b, c}
   end
 
   # math.sin(x)

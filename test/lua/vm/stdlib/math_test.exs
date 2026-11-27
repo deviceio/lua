@@ -379,4 +379,56 @@ defmodule Lua.VM.Stdlib.MathTest do
       assert run!(~s|return tonumber("0x.")|) == [nil]
     end
   end
+
+  describe "math.random generator state" do
+    test "seeding and drawing leave the host process's :rand state untouched" do
+      :rand.seed(:exsss, {1, 2, 3})
+      host_state = :rand.export_seed()
+
+      Lua.eval!(Lua.new(), """
+      local first = math.random()
+      math.randomseed(42)
+      return first, math.random(), math.random(10), math.random(5, 15)
+      """)
+
+      assert :rand.export_seed() == host_state
+    end
+
+    test "the same seed replays the same sequence, across evaluations and host :rand calls" do
+      {in_one_evaluation, _lua} =
+        Lua.eval!(Lua.new(), "math.randomseed(42) return math.random(1 << 40), math.random(1 << 40)")
+
+      {[], lua} = Lua.eval!(Lua.new(), "math.randomseed(42)")
+      :rand.seed(:exsss, {1, 2, 3})
+      {[first], lua} = Lua.eval!(lua, "return math.random(1 << 40)")
+      :rand.uniform()
+      {[second], _lua} = Lua.eval!(lua, "return math.random(1 << 40)")
+
+      assert [first, second] == in_one_evaluation
+    end
+
+    test "unseeded VMs from the same template draw different sequences under the same host seed" do
+      draw = fn ->
+        :rand.seed(:exsss, {1, 2, 3})
+        {values, _lua} = Lua.eval!(Lua.new(), "return math.random(1 << 40), math.random(1 << 40)")
+        values
+      end
+
+      refute draw.() == draw.()
+    end
+
+    test "a draw made inside a failed pcall is not replayed after it" do
+      {direct, _lua} = Lua.eval!(Lua.new(), "math.randomseed(7) return math.random(1 << 40), math.random(1 << 40)")
+
+      {through_pcall, _lua} =
+        Lua.eval!(Lua.new(), """
+        math.randomseed(7)
+        local inside
+        pcall(function() inside = math.random(1 << 40) error("boom") end)
+        return inside, math.random(1 << 40)
+        """)
+
+      assert through_pcall == direct
+    end
+  end
 end
