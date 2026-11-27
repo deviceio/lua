@@ -24,7 +24,7 @@ defmodule Lua.Compiler.Prototype do
           lines: {non_neg_integer(), non_neg_integer()},
           bytecode: tuple() | nil,
           goto_targets: %{
-            non_neg_integer() => {non_neg_integer(), non_neg_integer(), [instruction()]}
+            non_neg_integer() => {non_neg_integer(), non_neg_integer(), [instruction()], :forward | :backward}
           }
         }
 

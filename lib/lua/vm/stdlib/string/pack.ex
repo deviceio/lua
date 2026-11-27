@@ -54,10 +54,16 @@ defmodule Lua.VM.Stdlib.String.Pack do
     do_pack(ops, args, <<>>, max_bytes)
   end
 
-  @doc "Implements string.unpack(fmt, s [, pos])."
-  def unpack(fmt, s, pos) when is_binary(fmt) and is_binary(s) and is_integer(pos) do
+  @doc """
+  Implements string.unpack(fmt, s [, pos]).
+
+  `max_results` is the element ceiling (a state's `max_table_elements`); a
+  format that would return more values raises "too many results".
+  """
+  def unpack(fmt, s, pos, max_results) when is_binary(fmt) and is_binary(s) and is_integer(pos) do
     init_pos = normalize_init_pos(pos, byte_size(s))
     ops = parse(fmt)
+    Limits.check_result_count!(Enum.count(ops, &value_op?/1) + 1, max_results)
     do_unpack(ops, s, init_pos, [])
   end
 
@@ -474,6 +480,10 @@ defmodule Lua.VM.Stdlib.String.Pack do
         raise_runtime("unfinished string for format 'z'")
     end
   end
+
+  defp value_op?({:align, _alignment}), do: false
+  defp value_op?({:padding, _n}), do: false
+  defp value_op?(_op), do: true
 
   defp ensure_available(s, pos, size, msg) do
     if pos + size > byte_size(s) do

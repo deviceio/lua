@@ -77,6 +77,11 @@ defmodule Lua.VM.Stdlib.Table do
         details: "position out of bounds"
     end
 
+    # `len` may come from `__len`.
+    shift_count = len - pos + 1
+    Limits.check_range_count!(shift_count, state.max_table_elements, "table.insert")
+    state = Limits.charge!(state, shift_count)
+
     # Shift t[pos..len] up by one (top-down so reads stay coherent), then
     # write `value` into t[pos]. Reads route through __index, writes
     # through __newindex.
@@ -161,7 +166,10 @@ defmodule Lua.VM.Stdlib.Table do
     # t[len + 1], which was already nil.
     state =
       if pos < len do
-        Enum.reduce((pos + 1)..len//1, state, fn i, st ->
+        shift_count = len - pos
+        Limits.check_range_count!(shift_count, state.max_table_elements, "table.remove")
+
+        Enum.reduce((pos + 1)..len//1, Limits.charge!(state, shift_count), fn i, st ->
           {v, st} = Executor.table_index(tref, i, st)
           Executor.table_newindex(tref, i - 1, v, st)
         end)
@@ -220,7 +228,8 @@ defmodule Lua.VM.Stdlib.Table do
     table = Map.fetch!(state.tables, id)
 
     # Refuse an oversized range before allocating the result list.
-    if i <= j, do: Limits.check_range_count!(j - i + 1, "table.concat")
+    if i <= j, do: Limits.check_range_count!(j - i + 1, state.max_table_elements, "table.concat")
+    state = Limits.charge!(state, j - i + 1)
 
     {elements, state} =
       cond do
@@ -247,8 +256,9 @@ defmodule Lua.VM.Stdlib.Table do
     # A table can hold one string many times for a few words each, so the
     # joined size is unrelated to the table's own footprint. Sum the pieces
     # and refuse an oversized result before the join allocates it.
-    separator_bytes = max(j - i, 0) * byte_size(sep)
-    Limits.check_string_size!(IO.iodata_length(elements) + separator_bytes, state.max_string_bytes, state)
+    size = IO.iodata_length(elements) + max(j - i, 0) * byte_size(sep)
+    Limits.check_string_size!(size, state.max_string_bytes, state)
+    state = Limits.charge!(state, size)
 
     # concat_value/2 made every element a binary, so with no separator the
     # list is already the result's iodata.
@@ -289,28 +299,16 @@ defmodule Lua.VM.Stdlib.Table do
     # than mutating the raw table mid-sort.
     {len, state} = Executor.table_length(tref, state)
 
-    # Mirror ltablib.c sort: reject lengths at/above INT_MAX before
-    # touching the table, so a `__len` that returns a huge value raises
-    # "array too big" instead of materialising billions of slots.
-    if len > 1 and len >= @max_sort_length do
+    # ltablib.c rejects at INT_MAX; `sort_via_metamethods` materialises every
+    # slot up front, so the element ceiling applies too.
+    if (len > 1 and len >= @max_sort_length) or len > state.max_table_elements do
       raise ArgumentError,
         function_name: "table.sort",
         arg_num: 1,
         details: "array too big"
     end
 
-    # Host-protection ceiling below INT_MAX. `sort_via_metamethods` eagerly
-    # materialises `len` slots via __index before any comparator runs, so a
-    # hostile `__len` returning e.g. ~100M (well under INT_MAX) would still
-    # exhaust the BEAM. Share `Limits.max_element_count` with
-    # `concat`/`unpack`/`move` so the deterministic ceiling is uniform.
-    if len > Limits.max_element_count() do
-      raise ArgumentError,
-        function_name: "table.sort",
-        arg_num: 1,
-        details: "array too big"
-    end
-
+    state = Limits.charge!(state, sort_comparisons(len))
     table = Map.fetch!(state.tables, id)
 
     if table.metatable == nil do
@@ -331,6 +329,9 @@ defmodule Lua.VM.Stdlib.Table do
   defp table_sort([], _state) do
     raise ArgumentError.value_expected("table.sort", 1)
   end
+
+  defp sort_comparisons(len) when len < 2, do: 0
+  defp sort_comparisons(len), do: len * ceil(:math.log2(len))
 
   # Fast path for a metatable-less table: read each slot directly from
   # `data`, sort, then merge the sorted slice back over `data` in one pass.
@@ -400,28 +401,27 @@ defmodule Lua.VM.Stdlib.Table do
     {Enum.sort(values, &default_compare/2), state}
   end
 
-  defp sort_values(values, comp, state) do
-    # `Enum.sort/2` cannot thread external state through its comparator,
-    # so we use a stable insertion sort that does. Sort sizes here track
-    # the table being sorted, so for a 1000-element table this is
-    # O(n^2). Acceptable for now — matches the cost ceiling of calling
-    # `comp` n*log(n) times in any case (comp is the dominant cost).
-    Enum.reduce(values, {[], state}, fn val, {sorted, st} ->
-      {inserted, st} = insert_sorted(sorted, val, comp, st)
-      {inserted, st}
-    end)
+  # `Enum.sort/2` cannot thread state through the comparator. A stable merge
+  # sort does, and stays within the `sort_comparisons/1` calls charged above.
+  defp sort_values(values, comp, state), do: merge_sort(values, length(values), comp, state)
+
+  defp merge_sort(values, count, _comp, state) when count < 2, do: {values, state}
+
+  defp merge_sort(values, count, comp, state) do
+    left_count = div(count, 2)
+    {left, right} = Enum.split(values, left_count)
+    {left, state} = merge_sort(left, left_count, comp, state)
+    {right, state} = merge_sort(right, count - left_count, comp, state)
+    merge_sorted(left, right, comp, state, [])
   end
 
-  defp insert_sorted([], val, _comp, state), do: {[val], state}
+  defp merge_sorted([], right, _comp, state, merged), do: {Enum.reverse(merged, right), state}
+  defp merge_sorted(left, [], _comp, state, merged), do: {Enum.reverse(merged, left), state}
 
-  defp insert_sorted([head | tail] = list, val, comp, state) do
-    {less?, state} = invoke_compare(comp, val, head, state)
-
-    if less? do
-      {[val | list], state}
-    else
-      {rest, state} = insert_sorted(tail, val, comp, state)
-      {[head | rest], state}
+  defp merge_sorted([left_head | left_rest] = left, [right_head | right_rest] = right, comp, state, merged) do
+    case invoke_compare(comp, right_head, left_head, state) do
+      {true, state} -> merge_sorted(left, right_rest, comp, state, [right_head | merged])
+      {false, state} -> merge_sorted(left_rest, right, comp, state, [left_head | merged])
     end
   end
 
@@ -443,12 +443,15 @@ defmodule Lua.VM.Stdlib.Table do
 
   # table.pack(...)
   defp table_pack(args, state) do
+    count = length(args)
+    state = Limits.charge!(state, count)
+
     # Create a table with all arguments and 'n' field
     data =
       args
       |> Enum.with_index(1)
       |> Map.new(fn {val, idx} -> {idx, val} end)
-      |> Map.put("n", length(args))
+      |> Map.put("n", count)
 
     {tref, state} = State.alloc_table(state, data)
     {[tref], state}
@@ -485,17 +488,13 @@ defmodule Lua.VM.Stdlib.Table do
         got: Util.typeof(j)
     end
 
-    # Reject an oversized result count before materialising anything.
-    # `ltablib.c` rejects only at INT_MAX (count overflow plus the
-    # `lua_checkstack` arm), but on the BEAM even a sub-INT_MAX count like
-    # `table.unpack({}, 1, 5e8)` would build hundreds of millions of nils
-    # and exhaust the host. We share `Limits.max_element_count` with
-    # `concat`/`move` so the deterministic ceiling is uniform, well below
-    # INT_MAX yet far above any legitimate unpack. The subtraction stays
-    # within Elixir's arbitrary-precision integers, so it cannot overflow.
-    if i <= j and j - i >= Limits.max_element_count() do
+    # Reject an oversized result count before materialising anything, with
+    # the message `lua_checkstack` gives at PUC's stack limit.
+    if i <= j and j - i >= state.max_table_elements do
       raise RuntimeError.exception(value: "too many results to unpack")
     end
+
+    state = Limits.charge!(state, j - i + 1)
 
     # Read each element via __index. Empty range (i > j) returns no
     # values. Matches `ltablib.c` which uses `lua_geti` per slot.
@@ -655,8 +654,10 @@ defmodule Lua.VM.Stdlib.Table do
     # *does* take the ceiling: sort eagerly materialises every slot before
     # any comparator runs, so it has no per-step abort to rely on.)
     if plain_tables?(tref1, tref2, state) do
-      Limits.check_range_count!(n, "table.move")
+      Limits.check_range_count!(n, state.max_table_elements, "table.move")
     end
+
+    state = Limits.charge!(state, n)
 
     # PUC chooses copy direction so an in-place overlapping move stays
     # coherent: copy forward when the destination cannot clobber an

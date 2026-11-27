@@ -37,6 +37,7 @@ defmodule Lua.VM.Stdlib.Math do
   import Bitwise
 
   alias Lua.VM.ArgumentError
+  alias Lua.VM.Limits
   alias Lua.VM.Numeric
   alias Lua.VM.State
   alias Lua.VM.Stdlib.Util
@@ -388,7 +389,9 @@ defmodule Lua.VM.Stdlib.Math do
   end
 
   # math.max(x, ...)
-  defp math_max(args, state) when length(args) > 0 do
+  defp math_max([_ | _] = args, state) do
+    state = Limits.charge_elements!(state, args)
+
     if Enum.all?(args, &is_number/1) do
       {[Enum.max(args)], state}
     else
@@ -408,7 +411,9 @@ defmodule Lua.VM.Stdlib.Math do
   end
 
   # math.min(x, ...)
-  defp math_min(args, state) when length(args) > 0 do
+  defp math_min([_ | _] = args, state) do
+    state = Limits.charge_elements!(state, args)
+
     if Enum.all?(args, &is_number/1) do
       {[Enum.min(args)], state}
     else
@@ -570,6 +575,8 @@ defmodule Lua.VM.Stdlib.Math do
   end
 
   defp math_tointeger([x], state) when is_binary(x) do
+    state = Limits.charge!(state, byte_size(x))
+
     case Value.parse_number(x) do
       n when is_integer(n) -> {[n], state}
       n when is_float(n) -> {[float_to_integer_or_nil(n)], state}

@@ -25,6 +25,7 @@ defmodule Lua.VM.Stdlib.Utf8 do
   import Bitwise
 
   alias Lua.VM.ArgumentError
+  alias Lua.VM.Limits
   alias Lua.VM.RuntimeError
   alias Lua.VM.State
   alias Lua.VM.Stdlib.Util
@@ -55,6 +56,8 @@ defmodule Lua.VM.Stdlib.Utf8 do
   # ---------------------------------------------------------------------------
 
   defp utf8_char(args, state) do
+    state = Limits.charge_elements!(state, args)
+
     iolist =
       args
       |> Enum.with_index(1)
@@ -128,16 +131,20 @@ defmodule Lua.VM.Stdlib.Utf8 do
         details: "out of range"
     end
 
-    {collect_codepoints(s, posi, posj, []), state}
+    state = Limits.charge!(state, posj - posi + 1)
+
+    {collect_codepoints(s, posi, posj, [], 0, state.max_table_elements), state}
   end
 
-  defp collect_codepoints(_s, posi, posj, acc) when posi > posj do
+  defp collect_codepoints(_s, posi, posj, acc, _count, _max_count) when posi > posj do
     Enum.reverse(acc)
   end
 
-  defp collect_codepoints(s, posi, posj, acc) do
+  defp collect_codepoints(s, posi, posj, acc, count, max_count) do
+    Limits.check_slice_count!(count + 1, max_count)
+
     case decode_at(s, posi) do
-      {cp, len} -> collect_codepoints(s, posi + len, posj, [cp | acc])
+      {cp, len} -> collect_codepoints(s, posi + len, posj, [cp | acc], count + 1, max_count)
       :invalid -> raise RuntimeError, value: "invalid UTF-8 code"
     end
   end
@@ -180,6 +187,7 @@ defmodule Lua.VM.Stdlib.Utf8 do
         details: "final position out of string"
     end
 
+    state = Limits.charge!(state, posj - posi + 1)
     {do_utf8_len(s, posi, posj, 0), state}
   end
 
@@ -230,8 +238,13 @@ defmodule Lua.VM.Stdlib.Utf8 do
     # Operate in 0-based byte index internally (`pos`); convert back at end.
     pos = posi - 1
     result = do_offset(s, n, pos, len)
-    {result, state}
+    {result, Limits.charge!(state, scanned_bytes(result, n, posi, len))}
   end
+
+  # A scan that finds no character has run to the end it was moving toward.
+  defp scanned_bytes([nil], n, posi, len) when n > 0, do: len + 1 - posi
+  defp scanned_bytes([nil], _n, posi, _len), do: posi - 1
+  defp scanned_bytes([pos], _n, posi, _len), do: abs(pos - posi)
 
   defp do_offset(s, 0, pos, _len) do
     pos = scan_back_to_char_start(s, pos)

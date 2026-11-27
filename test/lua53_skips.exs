@@ -245,12 +245,6 @@
       issue: 257
     },
     %{
-      lines: 250..250,
-      category: :unimplemented,
-      reason: "'pattern too complex' recursion-depth limit not yet implemented",
-      issue: 257
-    },
-    %{
       lines: 277..277,
       category: :unimplemented,
       reason: "gsub table replacement keyed on a multi-char capture not yet implemented",
@@ -286,14 +280,14 @@
       lines: 201..209,
       category: :semantic,
       reason:
-        "table.sort with a deliberately-inconsistent comparator should raise 'invalid order function'; our insertion sort never detects it (PUC's quicksort-specific bounds check)",
+        "table.sort with a deliberately-inconsistent comparator should raise 'invalid order function'; our merge sort never detects it (PUC's quicksort-specific bounds check)",
       issue: 262
     },
     %{
       lines: 260..308,
       category: :performance,
       reason:
-        "50000-element table.sort timing block: the comparator path is O(n^2) and one comparator calls load() (excluded in the sandbox). The perm block above (lines 240-249) and test/lua/vm/stdlib/table_test.exs cover plain `<` ordering on numbers/strings and explicit-comparator dispatch (including a comparator that drives a __lt metamethod). The trailing `setmetatable(.., {__lt=..}); table.sort(a)` case is NOT covered: our default (no-comparator) sort compares only numbers and strings and never dispatches __lt, so a default sort over table elements raises 'attempt to compare table with table' instead of ordering through __lt.",
+        "50000-element table.sort timing block: one comparator calls load() (excluded in the sandbox). The perm block above (lines 240-249) and test/lua/vm/stdlib/table_test.exs cover plain `<` ordering on numbers/strings and explicit-comparator dispatch (including a comparator that drives a __lt metamethod). The trailing `setmetatable(.., {__lt=..}); table.sort(a)` case is NOT covered: our default (no-comparator) sort compares only numbers and strings and never dispatches __lt, so a default sort over table elements raises 'attempt to compare table with table' instead of ordering through __lt.",
       issue: 262
     }
   ],

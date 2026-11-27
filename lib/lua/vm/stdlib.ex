@@ -124,28 +124,19 @@ defmodule Lua.VM.Stdlib do
   defp lua_tostring([], state), do: {["nil"], state}
 
   # tonumber(v [, base]) — converts a string to a number
-  defp lua_tonumber([value | rest], state) do
-    base = List.first(rest)
-
-    result =
-      case {value, base} do
-        {v, nil} when is_number(v) ->
-          v
-
-        {v, nil} when is_binary(v) ->
-          Value.parse_number(v)
-
-        {v, b} when is_binary(v) and is_integer(b) and b >= 2 and b <= 36 ->
-          parse_in_base(v, b)
-
-        _ ->
-          nil
-      end
-
-    {[result], state}
+  defp lua_tonumber([value | rest], state) when is_binary(value) do
+    state = Limits.charge!(state, byte_size(value))
+    {[string_to_number(value, List.first(rest))], state}
   end
 
+  defp lua_tonumber([value], state) when is_number(value), do: {[value], state}
+  defp lua_tonumber([value, nil | _rest], state) when is_number(value), do: {[value], state}
+  defp lua_tonumber([_value | _rest], state), do: {[nil], state}
   defp lua_tonumber([], state), do: {[nil], state}
+
+  defp string_to_number(string, nil), do: Value.parse_number(string)
+  defp string_to_number(string, base) when is_integer(base) and base >= 2 and base <= 36, do: parse_in_base(string, base)
+  defp string_to_number(_string, _base), do: nil
 
   # tonumber(s, base) per Lua 5.3 §6.1: surrounding whitespace is ignored, an
   # optional sign is allowed, digits a-z/A-Z map to 10-35 (case-insensitive),
@@ -173,7 +164,8 @@ defmodule Lua.VM.Stdlib do
         {[str | acc], st}
       end)
 
-    output = strings |> Enum.reverse() |> Enum.join("\t")
+    output = strings |> Enum.reverse() |> Enum.map_intersperse("\t", &to_string/1)
+    state = Limits.charge!(state, IO.iodata_length(output))
     IO.puts(output)
     {[], state}
   end
@@ -418,25 +410,22 @@ defmodule Lua.VM.Stdlib do
   # select(index, ...) — returns arguments starting from index
   # select('#', ...) — returns count of arguments
   defp lua_select(["#" | args], state) do
-    {[length(args)], state}
+    count = length(args)
+    {[count], Limits.charge!(state, count)}
   end
 
-  defp lua_select([index | args], state) when is_integer(index) do
-    cond do
-      # Positive index: return from that position onward
-      index > 0 ->
-        selected = Enum.drop(args, index - 1)
-        {selected, state}
+  defp lua_select([index | args], state) when is_integer(index) and index > 0 do
+    state = Limits.charge_elements!(state, args)
+    {Enum.drop(args, index - 1), state}
+  end
 
-      # Negative index: count from end (take last n elements)
-      index < 0 ->
-        selected = Enum.take(args, index)
-        {selected, state}
+  defp lua_select([index | args], state) when is_integer(index) and index < 0 do
+    state = Limits.charge_elements!(state, args)
+    {Enum.take(args, index), state}
+  end
 
-      # Index 0 is invalid
-      true ->
-        raise RuntimeError, value: "bad argument #1 to 'select' (index out of range)"
-    end
+  defp lua_select([0 | _args], _state) do
+    raise RuntimeError, value: "bad argument #1 to 'select' (index out of range)"
   end
 
   defp lua_select([non_valid | _], _state) do
@@ -532,6 +521,8 @@ defmodule Lua.VM.Stdlib do
   end
 
   defp compile_loaded_chunk(source, env, state) do
+    state = Limits.charge!(state, byte_size(source))
+
     case Lua.Parser.parse(source) do
       {:ok, ast} ->
         # Compiler currently never returns errors, always succeeds — see

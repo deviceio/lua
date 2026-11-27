@@ -249,6 +249,15 @@ defmodule Lua.VM.MaxInstructionsTest do
       end
     end
 
+    test "a call refused at :max_call_depth still spends its instruction" do
+      code = "return pcall(pcall, type, 1)"
+      {[true, false, message], refused} = eval!(Lua.new(max_call_depth: 1, max_instructions: 1000), code)
+      {[true, true, "number"], allowed} = eval!(Lua.new(max_call_depth: 2, max_instructions: 1000), code)
+
+      assert message =~ "stack overflow"
+      assert refused.state.instruction_count == allowed.state.instruction_count
+    end
+
     test "require runs the module body against the same budget (no mid-eval reset)" do
       # `require` re-enters `Lua.VM.execute`, which resets the per-eval tally at
       # genuine top-level entry only. The pre-require work must still count: with

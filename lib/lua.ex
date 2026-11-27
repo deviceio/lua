@@ -12,6 +12,7 @@ defmodule Lua do
   alias Lua.VM.Display
   alias Lua.VM.Executor
   alias Lua.VM.InternalError
+  alias Lua.VM.Limits
   alias Lua.VM.RuntimeError
   alias Lua.VM.State
   alias Lua.VM.Table
@@ -90,7 +91,8 @@ defmodule Lua do
   * `:max_call_depth` - (default `:infinity`) caps the depth of nested function calls. When a
     script recurses deeper than this, a catchable `"stack overflow"` runtime error is raised
     instead of letting the recursion exhaust the host process. Accepts a positive integer or
-    `:infinity` for no limit.
+    `:infinity` for no limit. Functions called from library code (`pcall`, `table.sort`,
+    `string.gsub`, metamethods, `__call`) count like direct calls.
 
     Note: this VM does not implement proper tail-call optimization, so a call in tail position
     (`return f(x)`) consumes a frame like any other call. A finite `:max_call_depth` therefore
@@ -127,9 +129,21 @@ defmodule Lua do
     back-edges and call boundaries, so the default `:infinity` path carries no per-instruction
     cost. The budget is fresh per top-level evaluation and recoverable via `pcall`.
 
+    Work inside stdlib calls is charged too, one instruction per 16 units: a byte scanned or
+    built, an element visited or returned, a pattern-matcher step.
+
         iex> lua = Lua.new(max_instructions: 1000)
         iex> {[false, message], _lua} = Lua.eval!(lua, "return pcall(function() while true do end end)")
         iex> message =~ "instruction budget exceeded"
+        true
+
+  * `:max_table_elements` - (default 1,000,000) the most elements one stdlib call may produce
+    or walk (`table.unpack`, `table.concat`, `string.byte`, …), checked before the work starts.
+    Accepts a positive integer or `:infinity`.
+
+        iex> lua = Lua.new(max_table_elements: 100)
+        iex> {[false, message], _lua} = Lua.eval!(lua, "return pcall(table.unpack, {}, 1, 1000)")
+        iex> message =~ "too many results to unpack"
         true
   """
   @spec new(keyword()) :: t()
@@ -140,8 +154,9 @@ defmodule Lua do
         exclude: [],
         debug: false,
         max_call_depth: :infinity,
-        max_string_bytes: Lua.VM.Limits.max_string_bytes(),
-        max_instructions: :infinity
+        max_string_bytes: Limits.max_string_bytes(),
+        max_instructions: :infinity,
+        max_table_elements: Limits.max_element_count()
       )
 
     sandboxed = Keyword.fetch!(opts, :sandboxed)
@@ -150,6 +165,7 @@ defmodule Lua do
     max_call_depth = validate_max_call_depth!(Keyword.fetch!(opts, :max_call_depth))
     max_string_bytes = validate_max_string_bytes!(Keyword.fetch!(opts, :max_string_bytes))
     max_instructions = validate_max_instructions!(Keyword.fetch!(opts, :max_instructions))
+    max_table_elements = validate_max_table_elements!(Keyword.fetch!(opts, :max_table_elements))
 
     lua = template(sandboxed, exclude)
 
@@ -160,7 +176,8 @@ defmodule Lua do
           lua.state
           | max_call_depth: max_call_depth,
             max_string_bytes: max_string_bytes,
-            max_instructions: max_instructions
+            max_instructions: max_instructions,
+            max_table_elements: max_table_elements
         }
     }
   end
@@ -215,6 +232,14 @@ defmodule Lua do
   defp validate_max_instructions!(other) do
     raise ArgumentError,
           ":max_instructions must be a positive integer or :infinity, got: #{inspect(other)}"
+  end
+
+  defp validate_max_table_elements!(:infinity), do: :infinity
+  defp validate_max_table_elements!(count) when is_integer(count) and count > 0, do: count
+
+  defp validate_max_table_elements!(other) do
+    raise ArgumentError,
+          ":max_table_elements must be a positive integer or :infinity, got: #{inspect(other)}"
   end
 
   @doc """
@@ -849,39 +874,9 @@ defmodule Lua do
     end
   end
 
-  defp do_call_function({:native_func, fun}, args, state) do
-    {results, new_state} = fun.(args, state)
-    {:ok, List.wrap(results), new_state}
-  rescue
-    e -> {:error, e, recover_state(e, state)}
-  end
-
-  defp do_call_function({:lua_closure, proto, upvalues}, args, state) do
-    callee_regs = Tuple.duplicate(nil, max(proto.max_registers, proto.param_count) + 64)
-
-    callee_regs =
-      args
-      |> Enum.with_index()
-      |> Enum.reduce(callee_regs, fn {arg, i}, regs ->
-        if i < proto.param_count, do: put_elem(regs, i, arg), else: regs
-      end)
-
-    {results, _regs, new_state} =
-      Executor.execute(proto.instructions, callee_regs, upvalues, proto, state)
-
-    {:ok, results, new_state}
-  rescue
-    e -> {:error, e, recover_state(e, state)}
-  end
-
-  defp do_call_function({:compiled_closure, _, _} = closure, args, state) do
-    # Compiled callees route through the dispatcher; same observable
-    # contract as the interpreter branch above.
-    {results, new_state} = Executor.call_function(closure, args, state)
-    {:ok, results, new_state}
-  rescue
-    e -> {:error, e, recover_state(e, state)}
-  end
+  defp do_call_function({:native_func, _} = native, args, state), do: charge_and_call(native, args, state)
+  defp do_call_function({:lua_closure, _, _} = closure, args, state), do: charge_and_call(closure, args, state)
+  defp do_call_function({:compiled_closure, _, _} = closure, args, state), do: charge_and_call(closure, args, state)
 
   # A resolved tuple that isn't one of the callable shapes above — e.g. a
   # table or userdata reference. No name is available at this layer, so the
@@ -896,6 +891,32 @@ defmodule Lua do
   defp do_call_function(other, _args, state) do
     {:error, Executor.call_type_error(other, nil, state), state}
   end
+
+  # Host callbacks re-enter Lua through here, so the callee is charged like a library callback.
+  defp charge_and_call(function, args, %State{call_depth: call_depth} = state) do
+    {results, new_state} = call_uncharged(function, args, State.charge_call!(state))
+    {:ok, results, %{new_state | call_depth: call_depth}}
+  rescue
+    e -> {:error, e, recover_state(e, state)}
+  end
+
+  defp call_uncharged({:lua_closure, proto, upvalues}, args, state) do
+    callee_regs = Tuple.duplicate(nil, max(proto.max_registers, proto.param_count) + 64)
+
+    callee_regs =
+      args
+      |> Enum.with_index()
+      |> Enum.reduce(callee_regs, fn {arg, i}, regs ->
+        if i < proto.param_count, do: put_elem(regs, i, arg), else: regs
+      end)
+
+    {results, _regs, new_state} =
+      Executor.execute(proto.instructions, callee_regs, upvalues, proto, state)
+
+    {results, new_state}
+  end
+
+  defp call_uncharged(function, args, state), do: Executor.call_function_uncharged(function, args, state)
 
   # This is a protected-call boundary like pcall: trapping the error
   # unwinds control state, but heap effects the callee made before raising

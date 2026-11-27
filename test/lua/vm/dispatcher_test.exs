@@ -1374,6 +1374,7 @@ defmodule Lua.VM.DispatcherTest do
         """)
 
       assert encodes_op?(proto, Bytecode.op_goto())
+      refute encodes_op?(proto, Bytecode.op_goto_back())
       assert results == [1]
     end
 
@@ -1390,7 +1391,8 @@ defmodule Lua.VM.DispatcherTest do
         return f()
         """)
 
-      assert encodes_op?(proto, Bytecode.op_goto())
+      assert encodes_op?(proto, Bytecode.op_goto_back())
+      refute encodes_op?(proto, Bytecode.op_goto())
       assert results == [5]
     end
 
@@ -1410,7 +1412,28 @@ defmodule Lua.VM.DispatcherTest do
         """)
 
       assert encodes_op?(proto, Bytecode.op_goto())
+      refute encodes_op?(proto, Bytecode.op_goto_back())
       assert results == [42]
+    end
+
+    test "goto out of a loop to a label before it is a back-edge", %{} do
+      {proto, results} =
+        run!("""
+        function f()
+          local n = 0
+          ::again::
+          for i = 1, 3 do
+            n = n + 1
+            if n < 7 then goto again end
+          end
+          return n
+        end
+        return f()
+        """)
+
+      assert encodes_op?(proto, Bytecode.op_goto_back())
+      refute encodes_op?(proto, Bytecode.op_goto())
+      assert results == [9]
     end
 
     test "goto exiting a loop closes captured upvalues", %{} do

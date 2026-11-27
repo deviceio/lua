@@ -145,6 +145,9 @@ defmodule Lua.Compiler.Bytecode do
   # `Lua.Compiler.Peephole` emits the instruction; codegen never does.
   @op_call_self 76
 
+  # A `goto` to a preceding label: `@op_goto` that also ticks `:max_instructions`.
+  @op_goto_back 77
+
   # The call opcodes whose tuple is `{tag, base, name_hint}` before
   # `annotate_line/2` bakes the source line in.
   @static_arity_calls [
@@ -591,8 +594,8 @@ defmodule Lua.Compiler.Bytecode do
     # Illegal gotos (undefined / out-of-scope target) are rejected up front by
     # `Lua.Compiler.GotoValidation` as a compile error, so resolution always
     # succeeds here.
-    {:ok, depth, target_pc, level} = resolve_goto_target(name, block_path, labels, pc, ancestors)
-    {@op_goto, depth, target_pc, level}
+    {:ok, op, depth, target_pc, level} = resolve_goto_target(name, block_path, labels, pc, ancestors)
+    {op, depth, target_pc, level}
   end
 
   defp resolve_entry({@op_test, reg, then_bc, else_bc}, pc, labels, ancestors) do
@@ -620,7 +623,7 @@ defmodule Lua.Compiler.Bytecode do
 
   defp resolve_goto_target(name, goto_path, labels, from_pc, ancestors) do
     case find_label(labels, name, goto_path, from_pc) do
-      {:ok, target_pc, level} -> {:ok, 0, target_pc, level}
+      {:ok, target_pc, level} -> {:ok, goto_op(target_pc, from_pc), 0, target_pc, level}
       :error -> resolve_in_ancestors(name, goto_path, ancestors, 0)
     end
   end
@@ -631,10 +634,14 @@ defmodule Lua.Compiler.Bytecode do
     depth = depth + weight
 
     case find_label(labels, name, goto_path, from_pc) do
-      {:ok, target_pc, level} -> {:ok, depth, target_pc, level}
+      {:ok, target_pc, level} -> {:ok, goto_op(target_pc, from_pc), depth, target_pc, level}
       :error -> resolve_in_ancestors(name, goto_path, rest, depth)
     end
   end
+
+  # `from_pc` is the goto's own pc, or the enclosing construct's in an ancestor.
+  defp goto_op(target_pc, from_pc) when target_pc < from_pc, do: @op_goto_back
+  defp goto_op(_target_pc, _from_pc), do: @op_goto
 
   # Nearest visible label after `from_pc`, else nearest before — matching the
   # interpreter's `GotoResolution`. A label is visible when its block path is
@@ -730,6 +737,7 @@ defmodule Lua.Compiler.Bytecode do
   def op_set_list_multi, do: @op_set_list_multi
   def op_label, do: @op_label
   def op_goto, do: @op_goto
+  def op_goto_back, do: @op_goto_back
   def op_add_k, do: @op_add_k
   def op_subtract_k, do: @op_subtract_k
   def op_multiply_k, do: @op_multiply_k

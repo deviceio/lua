@@ -137,6 +137,7 @@ defmodule Lua.VM.Stdlib.Os do
   defp os_date([nil | rest], state), do: os_date(["%c" | rest], state)
 
   defp os_date([format | rest], state) when is_binary(format) do
+    state = Limits.charge!(state, byte_size(format))
     {format, utc?} = strip_utc_flag(format)
 
     time =

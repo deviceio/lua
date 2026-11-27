@@ -79,6 +79,7 @@ defmodule Lua.VM.Stdlib.String do
 
   # string.lower(s) - converts string to lowercase
   defp string_lower([str | _], state) when is_binary(str) do
+    state = Limits.charge!(state, byte_size(str))
     {[String.downcase(str)], state}
   end
 
@@ -92,6 +93,7 @@ defmodule Lua.VM.Stdlib.String do
 
   # string.upper(s) - converts string to uppercase
   defp string_upper([str | _], state) when is_binary(str) do
+    state = Limits.charge!(state, byte_size(str))
     {[String.upcase(str)], state}
   end
 
@@ -209,18 +211,17 @@ defmodule Lua.VM.Stdlib.String do
         got: Util.typeof(sep)
     end
 
-    result =
-      if n <= 0 do
-        ""
-      else
-        # Compute the result size from the count *before* building it, so an
-        # oversized request fails with a catchable error instead of trying to
-        # allocate (and OOM the host on) a multi-petabyte binary.
-        Limits.check_string_size!(n * byte_size(str) + (n - 1) * byte_size(sep), state.max_string_bytes)
-        build_rep(str, n, sep)
-      end
-
-    {[result], state}
+    if n <= 0 do
+      {[""], state}
+    else
+      # Compute the result size from the count *before* building it, so an
+      # oversized request fails with a catchable error instead of trying to
+      # allocate (and OOM the host on) a multi-petabyte binary.
+      size = n * byte_size(str) + (n - 1) * byte_size(sep)
+      Limits.check_string_size!(size, state.max_string_bytes)
+      state = Limits.charge!(state, size)
+      {[build_rep(str, n, sep)], state}
+    end
   end
 
   # Build the repeated string with allocation proportional to the *result*
@@ -238,6 +239,7 @@ defmodule Lua.VM.Stdlib.String do
   # byte arrays, not codepoint sequences — so a NUL or non-UTF-8 byte
   # must come back at the mirror position).
   defp string_reverse([str | _], state) when is_binary(str) do
+    state = Limits.charge!(state, byte_size(str))
     reversed = str |> :binary.bin_to_list() |> Enum.reverse() |> :binary.list_to_bin()
     {[reversed], state}
   end
@@ -276,14 +278,14 @@ defmodule Lua.VM.Stdlib.String do
     posi = if i < 0, do: max(len + i + 1, 1), else: max(i, 1)
     posj = if j < 0, do: len + j + 1, else: min(j, len)
 
-    bytes =
-      if posj < posi or posi > len or posj < 1 do
-        []
-      else
-        Enum.map(posi..posj//1, fn idx -> :binary.at(str, idx - 1) end)
-      end
-
-    {bytes, state}
+    if posj < posi or posi > len or posj < 1 do
+      {[], state}
+    else
+      count = posj - posi + 1
+      Limits.check_slice_count!(count, state.max_table_elements)
+      state = Limits.charge!(state, count)
+      {:binary.bin_to_list(str, posi - 1, count), state}
+    end
   end
 
   defp string_byte([other | _], _state) do
@@ -296,6 +298,8 @@ defmodule Lua.VM.Stdlib.String do
 
   # string.char(...) - converts byte values to characters
   defp string_char(args, state) do
+    state = Limits.charge_elements!(state, args)
+
     result =
       args
       |> Enum.with_index(1)
@@ -338,6 +342,7 @@ defmodule Lua.VM.Stdlib.String do
 
   # string.format(formatstring, ...) - formats strings with C-style format specifiers
   defp string_format([fmt | args], state) when is_binary(fmt) do
+    state = charge_format!(state, fmt, args)
     {segments, state} = compiled_format(fmt, state)
     # `argn` is the 1-based position of the next value argument. The format
     # string is arg #1, so the first conversion consumes arg #2; PUC reports a
@@ -355,6 +360,15 @@ defmodule Lua.VM.Stdlib.String do
   defp string_format([], _state) do
     raise_arg_expected(1, "format")
   end
+
+  defp charge_format!(%State{max_instructions: :infinity} = state, _fmt, _args), do: state
+  defp charge_format!(state, fmt, args), do: Limits.charge!(state, byte_size(fmt) + string_argument_bytes(args, 0))
+
+  defp string_argument_bytes([arg | rest], total) when is_binary(arg),
+    do: string_argument_bytes(rest, total + byte_size(arg))
+
+  defp string_argument_bytes([_arg | rest], total), do: string_argument_bytes(rest, total)
+  defp string_argument_bytes([], total), do: total
 
   # Look the format string up in the per-VM template cache, compiling and
   # memoizing it on a miss. The parse (literal splitting + spec scanning) is
@@ -1065,6 +1079,8 @@ defmodule Lua.VM.Stdlib.String do
             true -> 0
           end
 
+        state = Limits.charge!(state, len - search_pos + byte_size(pattern))
+
         case :binary.match(s, pattern, scope: {search_pos, len - search_pos}) do
           {start, found_len} ->
             {[start + 1, start + found_len], state}
@@ -1074,11 +1090,11 @@ defmodule Lua.VM.Stdlib.String do
         end
       end
     else
-      case Pattern.find(s, pattern, init) do
-        {start, stop, captures} ->
+      case Pattern.find(s, pattern, init, state) do
+        {{start, stop, captures}, state} ->
           {[start, stop | captures], state}
 
-        :nomatch ->
+        {:nomatch, state} ->
           {[nil], state}
       end
     end
@@ -1095,9 +1111,9 @@ defmodule Lua.VM.Stdlib.String do
     init = Enum.at(rest, 0, 1)
     init = if is_number(init), do: trunc(init), else: 1
 
-    case Pattern.match(s, pattern, init) do
-      {:match, captures} -> {captures, state}
-      :nomatch -> {[nil], state}
+    case Pattern.match(s, pattern, init, state) do
+      {{:match, captures}, state} -> {captures, state}
+      {:nomatch, state} -> {[nil], state}
     end
   end
 
@@ -1109,23 +1125,16 @@ defmodule Lua.VM.Stdlib.String do
 
   # string.gmatch(s, pattern) - returns iterator function
   defp string_gmatch([s, pattern | _], state) when is_binary(s) and is_binary(pattern) do
-    # Pre-compute all matches, return an iterator that yields them one by one
-    matches = Pattern.gmatch(s, pattern)
-    idx_ref = make_ref()
-    state = %{state | private: Map.put(state.private, idx_ref, {matches, 0})}
+    {iterator, state} = Pattern.gmatch_start(pattern, state)
+    iterator_key = make_ref()
+    state = State.put_private(state, iterator_key, iterator)
 
     iter_func =
       {:native_func,
-       fn _args, st ->
-         {match_list, current_idx} = Map.get(st.private, idx_ref)
-
-         if current_idx >= length(match_list) do
-           {[nil], st}
-         else
-           result = Enum.at(match_list, current_idx)
-           st = %{st | private: Map.put(st.private, idx_ref, {match_list, current_idx + 1})}
-           {result, st}
-         end
+       fn _args, call_state ->
+         iterator = State.get_private(call_state, iterator_key)
+         {result, iterator, call_state} = Pattern.gmatch_next(s, iterator, call_state)
+         {result || [nil], State.put_private(call_state, iterator_key, iterator)}
        end}
 
     {[iter_func], state}
@@ -1261,8 +1270,11 @@ defmodule Lua.VM.Stdlib.String do
   end
 
   # string.pack(fmt, v1, v2, ...) — pack values per fmt
+  # Padding and `c<n>` make the result's size unknown until it is built.
   defp string_pack([fmt | args], state) when is_binary(fmt) do
-    {[Pack.pack(fmt, args, state.max_string_bytes)], state}
+    state = Limits.charge!(state, byte_size(fmt))
+    packed = Pack.pack(fmt, args, state.max_string_bytes)
+    {[packed], Limits.charge!(state, byte_size(packed))}
   end
 
   defp string_pack([other | _], _state), do: raise_string_expected(1, "pack", other)
@@ -1278,8 +1290,8 @@ defmodule Lua.VM.Stdlib.String do
         _ -> raise ArgumentError, function_name: "string.unpack", arg_num: 3, expected: "number"
       end
 
-    results = Pack.unpack(fmt, s, pos)
-    {results, state}
+    state = Limits.charge!(state, byte_size(fmt))
+    {Pack.unpack(fmt, s, pos, state.max_table_elements), state}
   end
 
   defp string_unpack([fmt, other | _], _state) when is_binary(fmt) do
@@ -1291,6 +1303,7 @@ defmodule Lua.VM.Stdlib.String do
 
   # string.packsize(fmt) — return size in bytes for fixed-size formats
   defp string_packsize([fmt | _], state) when is_binary(fmt) do
+    state = Limits.charge!(state, byte_size(fmt))
     {[Pack.packsize(fmt)], state}
   end
 
