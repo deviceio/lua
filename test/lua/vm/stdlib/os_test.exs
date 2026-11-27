@@ -25,6 +25,11 @@ defmodule Lua.VM.Stdlib.OsTest do
       assert t == 946_684_800
     end
 
+    test "os.date rejects a time past the representable range" do
+      assert {[false, "time result cannot be represented in this installation"], _} =
+               Lua.eval!(~S[return pcall(os.date, "%Y", 2^60)])
+    end
+
     test "os.time_ms returns the current epoch in milliseconds" do
       {[t], _} = Lua.eval!("return os.time_ms()")
       assert is_integer(t)

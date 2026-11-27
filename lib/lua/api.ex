@@ -85,6 +85,11 @@ defmodule Lua.API do
 
   Keep in mind that if you want to work with values passed to `deflua` functions,
   they still need to be decoded first.
+
+  ## Errors
+
+  Call `runtime_exception!/1` or return `{:error, reason}` to give `pcall` a
+  readable error. Other exceptions reach `pcall` as `"error in host function"`.
   """
 
   defmacro __using__(opts) do

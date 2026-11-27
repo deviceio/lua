@@ -1253,26 +1253,12 @@ defmodule Lua do
 
       {data, %Lua{} = returned_lua} ->
         data = List.wrap(data)
-
-        if not Util.list_encoded?(data) do
-          raise Lua.RuntimeException,
-            function: function_name,
-            scope: module.scope(),
-            message: "deflua functions must return encoded data, got #{inspect(data)}"
-        end
-
+        validate_encoded!(data, function_name, module.scope())
         {data, returned_lua}
 
       data ->
         data = List.wrap(data)
-
-        if not Util.list_encoded?(data) do
-          raise Lua.RuntimeException,
-            function: function_name,
-            scope: module.scope(),
-            message: "deflua functions must return encoded data, got #{inspect(data)}"
-        end
-
+        validate_encoded!(data, function_name, module.scope())
         {data, lua}
     end
   catch
@@ -1328,14 +1314,21 @@ defmodule Lua do
      end}
   end
 
+  # Raised as a host exception: the message quotes host data.
   defp validate_encoded!(value, function_name, scope) do
     if not Util.list_encoded?(value) do
-      raise Lua.RuntimeException,
-        function: function_name,
-        scope: scope,
-        message: "deflua functions must return encoded data, got #{inspect(value)}"
+      unencoded_return =
+        ArgumentError.exception(
+          "#{callback_label(scope, function_name)} failed, " <>
+            "deflua functions must return encoded data, got #{inspect(value)}"
+        )
+
+      raise Lua.RuntimeException, unencoded_return
     end
   end
+
+  defp callback_label([], function_name), do: "#{function_name}()"
+  defp callback_label(scope, function_name), do: "#{Enum.join(scope, ".")}.#{function_name}()"
 
   defp to_lua_key(key) when is_atom(key), do: Atom.to_string(key)
   defp to_lua_key(key) when is_binary(key), do: key

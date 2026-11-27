@@ -55,6 +55,14 @@ is in the [`1.0.0-rc.0`](#100-rc0---2026-05-26) entry below.
   past the ceiling in a single allocation. Each raises the same catchable
   `"resulting string too large"` error as `string.rep` and `..`, before the
   result is built (#425).
+- `pcall` and `xpcall` return `"error in host function"` instead of the
+  message of an exception raised by host code, which can quote host data.
+  Errors raised for the script pass through unchanged.
+- `rawget`, `rawset`, `rawequal`, `next`, `getmetatable`, `setmetatable`,
+  `tostring`, `tonumber` and `select` raise Lua's `"bad argument"` errors
+  instead of an Elixir exception or a silent default.
+- `os.date` raises a Lua error for an out-of-range time instead of an Elixir
+  `ArgumentError`.
 
 ## [1.0.2] - 2026-07-28
 

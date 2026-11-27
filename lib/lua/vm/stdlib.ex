@@ -15,7 +15,6 @@ defmodule Lua.VM.Stdlib do
   alias Lua.VM.RuntimeError
   alias Lua.VM.State
   alias Lua.VM.Table
-  alias Lua.VM.TypeError
   alias Lua.VM.Value
 
   # Installed in this order: it is the order `pairs(_G)` and
@@ -121,31 +120,28 @@ defmodule Lua.VM.Stdlib do
     {[str], state}
   end
 
-  defp lua_tostring([], state), do: {["nil"], state}
+  defp lua_tostring([], _state), do: raise(ArgumentError.value_expected("tostring", 1))
 
   # tonumber(v [, base]) — converts a string to a number
-  defp lua_tonumber([value | rest], state) do
-    base = List.first(rest)
+  defp lua_tonumber([], _state), do: raise(ArgumentError.value_expected("tonumber", 1))
 
-    result =
-      case {value, base} do
-        {v, nil} when is_number(v) ->
-          v
+  defp lua_tonumber([value | base], state), do: {[tonumber(value, base)], state}
 
-        {v, nil} when is_binary(v) ->
-          Value.parse_number(v)
+  defp tonumber(value, []), do: to_number_or_nil(value)
+  defp tonumber(value, [nil | _]), do: to_number_or_nil(value)
+  defp tonumber(value, [base | _]), do: tonumber_in_base(value, integer_argument!(base, "tonumber", 2))
 
-        {v, b} when is_binary(v) and is_integer(b) and b >= 2 and b <= 36 ->
-          parse_in_base(v, b)
+  defp to_number_or_nil(value) when is_number(value), do: value
+  defp to_number_or_nil(value) when is_binary(value), do: Value.parse_number(value)
+  defp to_number_or_nil(_value), do: nil
 
-        _ ->
-          nil
-      end
+  defp tonumber_in_base(value, _base) when not is_binary(value),
+    do: raise(ArgumentError.type_error("tonumber", 1, "string", Value.type_name(value)))
 
-    {[result], state}
-  end
+  defp tonumber_in_base(_value, base) when base not in 2..36,
+    do: raise(ArgumentError, function_name: "tonumber", arg_num: 2, details: "base out of range")
 
-  defp lua_tonumber([], state), do: {[nil], state}
+  defp tonumber_in_base(value, base), do: parse_in_base(value, base)
 
   # tonumber(s, base) per Lua 5.3 §6.1: surrounding whitespace is ignored, an
   # optional sign is allowed, digits a-z/A-Z map to 10-35 (case-insensitive),
@@ -253,12 +249,7 @@ defmodule Lua.VM.Stdlib do
     {results, state} = Executor.call_function(func, args, state)
     {[true | results], state}
   rescue
-    e in [RuntimeError, AssertionError, TypeError, ArgumentError] ->
-      {[false, ProtectedCall.error_value(e)], State.unwind_to(state, e.state)}
-
-    e ->
-      # Catch any other error
-      {[false, Exception.message(e)], State.unwind_to(state, raised_state(e))}
+    exception -> {[false, ProtectedCall.caught_value(exception)], State.unwind_to(state, raised_state(exception))}
   end
 
   defp lua_pcall([], state), do: {[false, "bad argument #1 to 'pcall' (value expected)"], state}
@@ -273,12 +264,8 @@ defmodule Lua.VM.Stdlib do
     {results, state} = Executor.call_function(func, args, state)
     {[true | results], state}
   rescue
-    e in [RuntimeError, AssertionError, TypeError, ArgumentError] ->
-      run_xpcall_handler(handler, ProtectedCall.error_value(e), State.unwind_to(state, e.state))
-
-    e ->
-      # Catch any other error
-      run_xpcall_handler(handler, Exception.message(e), State.unwind_to(state, raised_state(e)))
+    exception ->
+      run_xpcall_handler(handler, ProtectedCall.caught_value(exception), State.unwind_to(state, raised_state(exception)))
   end
 
   defp lua_xpcall(_, state), do: {[false, "bad argument to 'xpcall'"], state}
@@ -304,11 +291,26 @@ defmodule Lua.VM.Stdlib do
     {[Table.get(table, key)], state}
   end
 
+  defp lua_rawget(args, _state), do: raise(table_argument_error("rawget", args))
+
   # rawset(table, key, value) — set without metamethods
   defp lua_rawset([{:tref, _} = tref, key, value | _], state) do
     state = State.update_table(state, tref, fn table -> Table.put(table, key, value) end)
     {[tref], state}
   end
+
+  defp lua_rawset(args, _state), do: raise(table_argument_error("rawset", args))
+
+  defp table_argument_error(function_name, []), do: ArgumentError.value_expected(function_name, 1)
+
+  defp table_argument_error(function_name, [{:tref, _} | _] = too_few_args),
+    do: missing_argument_error(function_name, too_few_args)
+
+  defp table_argument_error(function_name, [non_table | _]),
+    do: ArgumentError.type_error(function_name, 1, "table", Value.type_name(non_table))
+
+  defp missing_argument_error(function_name, given_args),
+    do: ArgumentError.value_expected(function_name, length(given_args) + 1)
 
   # rawlen(v) — length without metamethods.
   #
@@ -342,7 +344,7 @@ defmodule Lua.VM.Stdlib do
     {[a === b], state}
   end
 
-  defp lua_rawequal(_, state), do: {[false], state}
+  defp lua_rawequal(args, _state), do: raise(missing_argument_error("rawequal", args))
 
   # next(table [, key]) — returns next key-value pair after key.
   # Per Lua 5.3 §6.1, when `key` is non-nil and was never a key in the
@@ -381,7 +383,7 @@ defmodule Lua.VM.Stdlib do
     end
   end
 
-  defp lua_next(_, state), do: {[nil, nil], state}
+  defp lua_next(args, _state), do: raise(table_argument_error("next", args))
 
   # pairs(table) — returns next, table, nil
   defp lua_pairs([{:tref, _} = tref | _], state) do
@@ -421,23 +423,19 @@ defmodule Lua.VM.Stdlib do
     {[length(args)], state}
   end
 
-  defp lua_select([index | args], state) when is_integer(index) do
-    cond do
-      # Positive index: return from that position onward
-      index > 0 ->
-        selected = Enum.drop(args, index - 1)
-        {selected, state}
-
-      # Negative index: count from end (take last n elements)
-      index < 0 ->
-        selected = Enum.take(args, index)
-        {selected, state}
-
-      # Index 0 is invalid
-      true ->
-        raise RuntimeError, value: "bad argument #1 to 'select' (index out of range)"
-    end
+  defp lua_select([index | args], state) when is_integer(index) and index > 0 do
+    {Enum.drop(args, index - 1), state}
   end
+
+  defp lua_select([index | args], state) when is_integer(index) and index < 0 and -index <= length(args) do
+    {Enum.take(args, index), state}
+  end
+
+  defp lua_select([index | _], _state) when is_integer(index),
+    do: raise(ArgumentError, function_name: "select", arg_num: 1, details: "index out of range")
+
+  defp lua_select([index | args], state) when is_float(index),
+    do: lua_select([integer_argument!(index, "select", 1) | args], state)
 
   defp lua_select([non_valid | _], _state) do
     raise ArgumentError,
@@ -450,6 +448,25 @@ defmodule Lua.VM.Stdlib do
   defp lua_select([], _state) do
     raise ArgumentError.value_expected("select", 1)
   end
+
+  # `luaL_checkinteger`: accepts a float with an exact integer value.
+  defp integer_argument!(value, _function_name, _arg_num) when is_integer(value), do: value
+
+  defp integer_argument!(value, function_name, arg_num) when is_float(value) do
+    truncated = trunc(value)
+
+    if value == truncated and Numeric.signed?(truncated) do
+      truncated
+    else
+      raise ArgumentError,
+        function_name: function_name,
+        arg_num: arg_num,
+        details: "number has no integer representation"
+    end
+  end
+
+  defp integer_argument!(value, function_name, arg_num),
+    do: raise(ArgumentError.type_error(function_name, arg_num, "number", Value.type_name(value)))
 
   # load(chunk, chunkname, mode, env) — loads a Lua chunk
   # `chunk` may be either a string or a reader function. A reader function
@@ -565,7 +582,7 @@ defmodule Lua.VM.Stdlib do
   defp format_parse_error(error) when is_binary(error), do: error
 
   # setmetatable(table, metatable) — sets the metatable for a table
-  defp lua_setmetatable([{:tref, _} = tref, metatable], state) do
+  defp lua_setmetatable([{:tref, _} = tref, metatable | _], state) do
     # Check for __metatable protection on existing metatable
     table = State.get_table(state, tref)
 
@@ -597,6 +614,10 @@ defmodule Lua.VM.Stdlib do
           arg_num: 2,
           expected: "nil or table"
     end
+  end
+
+  defp lua_setmetatable([{:tref, _}], _state) do
+    raise ArgumentError, function_name: "setmetatable", arg_num: 2, expected: "nil or table"
   end
 
   defp lua_setmetatable([non_table | _], _state) do
@@ -642,8 +663,8 @@ defmodule Lua.VM.Stdlib do
     {[nil], state}
   end
 
-  defp lua_getmetatable([], state) do
-    {[nil], state}
+  defp lua_getmetatable([], _state) do
+    raise ArgumentError.value_expected("getmetatable", 1)
   end
 
   # Install package table with loaded and path fields

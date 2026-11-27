@@ -227,7 +227,10 @@ defmodule Lua.VM.Stdlib.Os do
   # treated as identical. The utc? flag is parsed for compatibility with
   # the leading '!' but does not change the result.
   defp to_datetime(time, _utc?) do
-    DateTime.from_unix!(time, :second)
+    case DateTime.from_unix(time, :second) do
+      {:ok, datetime} -> datetime
+      {:error, _reason} -> raise RuntimeError, value: "time result cannot be represented in this installation"
+    end
   end
 
   defp date_table(%DateTime{} = dt, state) do
