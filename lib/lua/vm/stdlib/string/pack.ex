@@ -18,6 +18,7 @@ defmodule Lua.VM.Stdlib.String.Pack do
 
   alias Lua.VM.Limits
   alias Lua.VM.RuntimeError
+  alias Lua.VM.Value
 
   # Platform constants. We run on the 64-bit BEAM, so these match the
   # standard 64-bit C ABI that Lua 5.3 was specced against.
@@ -669,10 +670,10 @@ defmodule Lua.VM.Stdlib.String.Pack do
     end
   end
 
-  defp to_integer(s, _) when is_binary(s) do
-    case Integer.parse(s) do
-      {n, ""} -> n
-      _ -> raise_runtime("bad argument (number expected)")
+  defp to_integer(s, fname) when is_binary(s) do
+    case Value.parse_number(s) do
+      nil -> raise_runtime("bad argument (number expected)")
+      number -> to_integer(number, fname)
     end
   end
 

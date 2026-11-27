@@ -20,6 +20,8 @@ defmodule Lua.Lexer do
 
   import Bitwise
 
+  alias Lua.Numeral
+
   @type position :: %{line: pos_integer(), column: pos_integer(), byte_offset: non_neg_integer()}
   @type token ::
           {:keyword, atom(), position()}
@@ -30,11 +32,6 @@ defmodule Lua.Lexer do
           | {:delimiter, atom(), position()}
           | {:comment, :single | :multi, String.t(), position()}
           | {:eof, position()}
-
-  # Signed 64-bit wrap-around constants for integer literals.
-  @uint64_mask 0xFFFFFFFFFFFFFFFF
-  @uint64_modulus 0x10000000000000000
-  @sign_bit 0x8000000000000000
 
   @compile {:inline, position: 3, utf8_width: 1, chunked_text: 4}
 
@@ -197,7 +194,7 @@ defmodule Lua.Lexer do
 
   # Numbers: hex (0x, 0X)
   defp do_tokenize(<<"0", x, rest::binary>>, acc, src, line, line_start, offset) when x in [?x, ?X] do
-    scan_hex_int(rest, acc, src, line, line_start, offset + 2, offset + 2, offset)
+    scan_hex_digits(rest, acc, src, line, line_start, offset + 2, offset)
   end
 
   # Numbers: decimal or float
@@ -803,229 +800,100 @@ defmodule Lua.Lexer do
   defp keyword_atom("while"), do: {:ok, :while}
   defp keyword_atom(_), do: :error
 
-  # Scan decimal number. `token_start` is the byte offset of the first
-  # character of the literal; the digit runs are measured against it and the
-  # value is converted straight from the source bytes.
+  # Numerals are only delimited here; `Lua.Numeral.parse/1` rejects malformed
+  # ones such as `1e` or `0x1p`.
   defp scan_int_digits(<<c, rest::binary>>, acc, src, line, line_start, offset, token_start) when c in ?0..?9 do
     scan_int_digits(rest, acc, src, line, line_start, offset + 1, token_start)
   end
 
   # ".." is the concat operator, not a decimal point: 0..5 → 0 .. 5
   defp scan_int_digits(<<"..", _rest::binary>> = bin, acc, src, line, line_start, offset, token_start) do
-    emit_integer(bin, acc, src, line, line_start, offset, token_start)
+    emit_number(bin, acc, src, line, line_start, offset, token_start)
   end
 
   defp scan_int_digits(<<".", rest::binary>>, acc, src, line, line_start, offset, token_start) do
-    scan_frac_digits(rest, acc, src, line, line_start, offset + 1, token_start, offset - token_start, offset + 1)
+    scan_frac_digits(rest, acc, src, line, line_start, offset + 1, token_start)
   end
 
-  # Scientific notation without a decimal point: 1e5
   defp scan_int_digits(<<c, rest::binary>>, acc, src, line, line_start, offset, token_start) when c in [?e, ?E] do
-    mantissa = binary_part(src, token_start, offset - token_start) <> ".0"
-    scan_exponent(rest, acc, src, line, line_start, offset + 1, token_start, mantissa)
+    scan_exponent(rest, acc, src, line, line_start, offset + 1, token_start)
   end
 
   defp scan_int_digits(bin, acc, src, line, line_start, offset, token_start) do
-    emit_integer(bin, acc, src, line, line_start, offset, token_start)
+    emit_number(bin, acc, src, line, line_start, offset, token_start)
   end
 
-  # Scan the fractional digits after a decimal point.
-  defp scan_frac_digits(<<c, rest::binary>>, acc, src, line, line_start, offset, token_start, int_len, frac_start)
-       when c in ?0..?9 do
-    scan_frac_digits(rest, acc, src, line, line_start, offset + 1, token_start, int_len, frac_start)
+  defp scan_frac_digits(<<c, rest::binary>>, acc, src, line, line_start, offset, token_start) when c in ?0..?9 do
+    scan_frac_digits(rest, acc, src, line, line_start, offset + 1, token_start)
   end
 
-  defp scan_frac_digits(<<c, rest::binary>>, acc, src, line, line_start, offset, token_start, int_len, frac_start)
-       when c in [?e, ?E] do
-    mantissa = mantissa_binary(src, token_start, int_len, frac_start, offset - frac_start)
-    scan_exponent(rest, acc, src, line, line_start, offset + 1, token_start, mantissa)
+  defp scan_frac_digits(<<c, rest::binary>>, acc, src, line, line_start, offset, token_start) when c in [?e, ?E] do
+    scan_exponent(rest, acc, src, line, line_start, offset + 1, token_start)
   end
 
-  defp scan_frac_digits(bin, acc, src, line, line_start, offset, token_start, int_len, frac_start) do
-    mantissa = mantissa_binary(src, token_start, int_len, frac_start, offset - frac_start)
-    emit_float(bin, acc, src, line, line_start, offset, token_start, mantissa)
+  defp scan_frac_digits(bin, acc, src, line, line_start, offset, token_start) do
+    emit_number(bin, acc, src, line, line_start, offset, token_start)
   end
 
-  # Scan the exponent of a decimal float. `mantissa` is already normalized to
-  # a form Erlang's binary_to_float/1 accepts (digits on both sides of a dot).
-  defp scan_exponent(<<sign, rest::binary>>, acc, src, line, line_start, offset, token_start, mantissa)
-       when sign in [?+, ?-] do
-    scan_exponent_digits(rest, acc, src, line, line_start, offset + 1, token_start, mantissa <> <<?e, sign>>, offset + 1)
+  defp scan_hex_digits(<<c, rest::binary>>, acc, src, line, line_start, offset, token_start)
+       when c in ?0..?9 or c in ?a..?f or c in ?A..?F do
+    scan_hex_digits(rest, acc, src, line, line_start, offset + 1, token_start)
   end
 
-  defp scan_exponent(bin, acc, src, line, line_start, offset, token_start, mantissa) do
-    scan_exponent_digits(bin, acc, src, line, line_start, offset, token_start, mantissa <> "e", offset)
+  defp scan_hex_digits(<<".", rest::binary>>, acc, src, line, line_start, offset, token_start) do
+    scan_hex_frac(rest, acc, src, line, line_start, offset + 1, token_start)
   end
 
-  defp scan_exponent_digits(<<c, rest::binary>>, acc, src, line, line_start, offset, token_start, mantissa, digit_start)
-       when c in ?0..?9 do
-    scan_exponent_digits(rest, acc, src, line, line_start, offset + 1, token_start, mantissa, digit_start)
+  defp scan_hex_digits(<<p, rest::binary>>, acc, src, line, line_start, offset, token_start) when p in [?p, ?P] do
+    scan_exponent(rest, acc, src, line, line_start, offset + 1, token_start)
   end
 
-  # An exponent marker with no digits after it is a malformed number.
-  defp scan_exponent_digits(_bin, _acc, _src, line, line_start, offset, token_start, _mantissa, digit_start)
-       when offset == digit_start do
-    {:error, {:invalid_number, position(line, line_start, token_start)}}
+  defp scan_hex_digits(bin, acc, src, line, line_start, offset, token_start) do
+    emit_number(bin, acc, src, line, line_start, offset, token_start)
   end
 
-  defp scan_exponent_digits(bin, acc, src, line, line_start, offset, token_start, mantissa, digit_start) do
-    literal = mantissa <> binary_part(src, digit_start, offset - digit_start)
-    emit_float(bin, acc, src, line, line_start, offset, token_start, literal)
+  defp scan_hex_frac(<<c, rest::binary>>, acc, src, line, line_start, offset, token_start)
+       when c in ?0..?9 or c in ?a..?f or c in ?A..?F do
+    scan_hex_frac(rest, acc, src, line, line_start, offset + 1, token_start)
   end
 
-  # Normalize the mantissa so Erlang's strict float syntax accepts it: digits
-  # are required on both sides of the decimal point.
-  defp mantissa_binary(src, token_start, int_len, _frac_start, 0) when int_len > 0 do
-    binary_part(src, token_start, int_len) <> ".0"
+  defp scan_hex_frac(<<p, rest::binary>>, acc, src, line, line_start, offset, token_start) when p in [?p, ?P] do
+    scan_exponent(rest, acc, src, line, line_start, offset + 1, token_start)
   end
 
-  defp mantissa_binary(src, _token_start, 0, frac_start, frac_len) when frac_len > 0 do
-    "0." <> binary_part(src, frac_start, frac_len)
+  defp scan_hex_frac(bin, acc, src, line, line_start, offset, token_start) do
+    emit_number(bin, acc, src, line, line_start, offset, token_start)
   end
 
-  defp mantissa_binary(src, token_start, int_len, _frac_start, frac_len) when int_len > 0 and frac_len > 0 do
-    binary_part(src, token_start, int_len + 1 + frac_len)
+  defp scan_exponent(<<sign, rest::binary>>, acc, src, line, line_start, offset, token_start) when sign in [?+, ?-] do
+    scan_exponent_digits(rest, acc, src, line, line_start, offset + 1, token_start)
   end
 
-  defp mantissa_binary(_src, _token_start, _int_len, _frac_start, _frac_len), do: "0.0"
-
-  defp emit_integer(bin, acc, src, line, line_start, offset, token_start) do
-    value = :erlang.binary_to_integer(binary_part(src, token_start, offset - token_start))
-
-    # Lua 5.3.3 §3.1: a decimal integer literal that overflows the signed
-    # 64-bit range converts to a float (a leading sign is a separate token,
-    # so `value` here is always the non-negative magnitude). Hex integer
-    # literals instead wrap via wrap_int64; this branch is decimal only.
-    # @sign_bit is 2^63, i.e. max_int + 1, so `>= @sign_bit` means overflow.
-    number = if value >= @sign_bit, do: value * 1.0, else: value
-    token = {:number, number, position(line, line_start, token_start)}
-    do_tokenize(bin, [token | acc], src, line, line_start, offset)
+  defp scan_exponent(bin, acc, src, line, line_start, offset, token_start) do
+    scan_exponent_digits(bin, acc, src, line, line_start, offset, token_start)
   end
 
-  defp emit_float(bin, acc, src, line, line_start, offset, token_start, literal) do
-    case parse_float(literal) do
+  defp scan_exponent_digits(<<c, rest::binary>>, acc, src, line, line_start, offset, token_start) when c in ?0..?9 do
+    scan_exponent_digits(rest, acc, src, line, line_start, offset + 1, token_start)
+  end
+
+  defp scan_exponent_digits(bin, acc, src, line, line_start, offset, token_start) do
+    emit_number(bin, acc, src, line, line_start, offset, token_start)
+  end
+
+  defp emit_number(bin, acc, src, line, line_start, offset, token_start) do
+    numeral = binary_part(src, token_start, offset - token_start)
+
+    case Numeral.parse(numeral) do
       {:ok, value} ->
         token = {:number, value, position(line, line_start, token_start)}
         do_tokenize(bin, [token | acc], src, line, line_start, offset)
 
       :error ->
-        {:error, {:invalid_number, position(line, line_start, token_start)}}
+        {:error, {malformed_number_kind(numeral), position(line, line_start, token_start)}}
     end
   end
 
-  # The literal is always well-formed by construction; the only way this can
-  # fail is a magnitude outside the double range, e.g. `1e400`.
-  defp parse_float(literal) do
-    {:ok, :erlang.binary_to_float(literal)}
-  rescue
-    ArgumentError -> :error
-  end
-
-  # Scan hexadecimal number (0x...) — supports integers, hex floats (0xF0.0), and exponents (0xABCp-3)
-  defp scan_hex_int(<<c, rest::binary>>, acc, src, line, line_start, offset, digit_start, token_start)
-       when c in ?0..?9 or c in ?a..?f or c in ?A..?F do
-    scan_hex_int(rest, acc, src, line, line_start, offset + 1, digit_start, token_start)
-  end
-
-  # Hex float: dot followed by hex digits
-  defp scan_hex_int(<<".", rest::binary>>, acc, src, line, line_start, offset, digit_start, token_start) do
-    int_hex = binary_part(src, digit_start, offset - digit_start)
-    scan_hex_frac(rest, acc, src, line, line_start, offset + 1, offset + 1, int_hex, token_start)
-  end
-
-  # Hex float: binary exponent (p/P)
-  defp scan_hex_int(<<p, rest::binary>>, acc, src, line, line_start, offset, digit_start, token_start)
-       when p in [?p, ?P] do
-    int_hex = binary_part(src, digit_start, offset - digit_start)
-    scan_hex_exponent(rest, acc, src, line, line_start, offset + 1, int_hex, "", token_start)
-  end
-
-  defp scan_hex_int(bin, acc, src, line, line_start, offset, digit_start, token_start) when offset > digit_start do
-    # Per Lua 5.3 §3.1: hex integer literals overflow-wrap into the
-    # signed 64-bit range. e.g. 0xFFFFFFFFFFFFFFFF == -1.
-    value = wrap_int64(:erlang.binary_to_integer(binary_part(src, digit_start, offset - digit_start), 16))
-    token = {:number, value, position(line, line_start, token_start)}
-    do_tokenize(bin, [token | acc], src, line, line_start, offset)
-  end
-
-  defp scan_hex_int(_bin, _acc, _src, line, line_start, _offset, _digit_start, token_start) do
-    {:error, {:invalid_hex_number, position(line, line_start, token_start)}}
-  end
-
-  # Wrap an unsigned hex integer to the signed 64-bit range. Inlined here so
-  # the lexer doesn't depend on Lua.VM.Numeric (kept VM-internal).
-  defp wrap_int64(n) when is_integer(n) do
-    masked = band(n, @uint64_mask)
-    if masked >= @sign_bit, do: masked - @uint64_modulus, else: masked
-  end
-
-  # Scan hex fractional digits after the dot
-  defp scan_hex_frac(<<c, rest::binary>>, acc, src, line, line_start, offset, frac_start, int_hex, token_start)
-       when c in ?0..?9 or c in ?a..?f or c in ?A..?F do
-    scan_hex_frac(rest, acc, src, line, line_start, offset + 1, frac_start, int_hex, token_start)
-  end
-
-  # Hex float fractional part followed by exponent
-  defp scan_hex_frac(<<p, rest::binary>>, acc, src, line, line_start, offset, frac_start, int_hex, token_start)
-       when p in [?p, ?P] do
-    frac_hex = binary_part(src, frac_start, offset - frac_start)
-    scan_hex_exponent(rest, acc, src, line, line_start, offset + 1, int_hex, frac_hex, token_start)
-  end
-
-  # Hex float fractional part without exponent
-  defp scan_hex_frac(bin, acc, src, line, line_start, offset, frac_start, int_hex, token_start) do
-    frac_hex = binary_part(src, frac_start, offset - frac_start)
-    token = {:number, build_hex_float(int_hex, frac_hex, 0), position(line, line_start, token_start)}
-    do_tokenize(bin, [token | acc], src, line, line_start, offset)
-  end
-
-  # Scan binary exponent (p/P followed by optional sign and decimal digits)
-  defp scan_hex_exponent(<<sign, rest::binary>>, acc, src, line, line_start, offset, int_hex, frac_hex, token_start)
-       when sign in [?+, ?-] do
-    scan_hex_exponent_digits(rest, acc, src, line, line_start, offset + 1, offset, int_hex, frac_hex, token_start)
-  end
-
-  defp scan_hex_exponent(bin, acc, src, line, line_start, offset, int_hex, frac_hex, token_start) do
-    scan_hex_exponent_digits(bin, acc, src, line, line_start, offset, offset, int_hex, frac_hex, token_start)
-  end
-
-  defp scan_hex_exponent_digits(
-         <<c, rest::binary>>,
-         acc,
-         src,
-         line,
-         line_start,
-         offset,
-         exp_start,
-         int_hex,
-         frac_hex,
-         token_start
-       )
-       when c in ?0..?9 do
-    scan_hex_exponent_digits(rest, acc, src, line, line_start, offset + 1, exp_start, int_hex, frac_hex, token_start)
-  end
-
-  defp scan_hex_exponent_digits(bin, acc, src, line, line_start, offset, exp_start, int_hex, frac_hex, token_start) do
-    exp = hex_exponent_value(binary_part(src, exp_start, offset - exp_start))
-    token = {:number, build_hex_float(int_hex, frac_hex, exp), position(line, line_start, token_start)}
-    do_tokenize(bin, [token | acc], src, line, line_start, offset)
-  end
-
-  defp hex_exponent_value(digits) when digits in ["", "+", "-"], do: 0
-  defp hex_exponent_value(digits), do: :erlang.binary_to_integer(digits)
-
-  # Build a hex float value from integer hex digits, fractional hex digits, and binary exponent
-  defp build_hex_float(int_hex, frac_hex, exp) do
-    int_val = if int_hex == "", do: 0, else: :erlang.binary_to_integer(int_hex, 16)
-
-    frac_val =
-      if frac_hex == "" do
-        0.0
-      else
-        frac_int = :erlang.binary_to_integer(frac_hex, 16)
-        frac_int / :math.pow(16, byte_size(frac_hex))
-      end
-
-    (int_val + frac_val) * :math.pow(2, exp)
-  end
+  defp malformed_number_kind(<<"0", x, _rest::binary>>) when x in [?x, ?X], do: :invalid_hex_number
+  defp malformed_number_kind(_numeral), do: :invalid_number
 end

@@ -150,6 +150,14 @@ defmodule Lua.VM.Stdlib.StringPackTest do
         lua!("return string.pack('<I1', -1)")
       end
     end
+
+    test "a string argument converts like tonumber, however long" do
+      assert lua!(~S{return string.pack('<i4', ' 0x10 ')}) == [<<16, 0, 0, 0>>]
+
+      assert_raise RuntimeError, ~r/number has no integer representation/, fn ->
+        lua!(~S{return string.pack('j', string.rep('9', 1000000))})
+      end
+    end
   end
 
   describe "string.pack/2 — float formats" do

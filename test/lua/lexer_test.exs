@@ -136,6 +136,38 @@ defmodule Lua.LexerTest do
     end
   end
 
+  describe "long and extreme numerals" do
+    defp number!(source) do
+      assert {:ok, [{:number, value, _}, {:eof, _}]} = Lexer.tokenize(source)
+      value
+    end
+
+    defp digits(digit, count), do: String.duplicate(digit, count)
+
+    test "a decimal integer literal of any length becomes a float instead of raising" do
+      assert number!(digits("9", 200_000)) === 1.0e308
+      assert {:ok, %Lua.Chunk{}} = Lua.parse_chunk("return " <> digits("9", 200_000))
+      assert {[1.0e308], _} = Lua.eval!(Lua.new(), "return " <> digits("9", 200_000))
+    end
+
+    test "a hexadecimal integer literal of any length wraps modulo 2^64" do
+      assert number!("0x" <> digits("f", 200_000)) === -1
+      assert number!("0x" <> digits("f", 2_000_000)) === -1
+    end
+
+    test "huge exponents and mantissas give the infinity stand-in or zero" do
+      assert number!("1e99999") === 1.0e308
+      assert number!("1e" <> digits("9", 50_000)) === 1.0e308
+      assert number!("1e-99999") === 0.0
+      assert number!(digits("9", 200_000) <> ".5") === 1.0e308
+      assert number!("1." <> digits("9", 200_000)) === 2.0
+      assert number!("0x1p99999") === 1.0e308
+      assert number!("0x.1p-99999") === 0.0
+      assert number!("0x" <> digits("f", 200_000) <> ".0") === 1.0e308
+      assert number!("0x1." <> digits("f", 200_000)) === 2.0
+    end
+  end
+
   describe "strings" do
     test "tokenizes double-quoted strings" do
       assert {:ok, [{:string, "hello", _}, {:eof, _}]} = Lexer.tokenize(~s("hello"))
@@ -879,6 +911,12 @@ defmodule Lua.LexerTest do
     test "reports error for invalid hex number" do
       assert {:error, {:invalid_hex_number, _}} = Lexer.tokenize("0x")
       assert {:error, {:invalid_hex_number, _}} = Lexer.tokenize("0xg")
+    end
+
+    test "reports error for a hex float with no digits or no exponent digits" do
+      for source <- ["0x.", "0x.p1", "0x1p", "0x1p+", "0x1.8P-"] do
+        assert {:error, {:invalid_hex_number, _}} = Lexer.tokenize(source)
+      end
     end
 
     test "handles uppercase X in hex numbers" do

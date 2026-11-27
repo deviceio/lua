@@ -55,7 +55,8 @@ defmodule Lua.Parser.ErrorPositionTest do
   @lexer_errors [
     {"unterminated string", "x = \"abc\n", 1, 9, "Unclosed string literal"},
     {"unterminated long string", "x = [[abc\n", 2, 1, "Unclosed long string"},
-    {"unterminated long comment", "--[[ comment\nx = 1\n", 3, 1, "Unclosed multi-line comment"}
+    {"unterminated long comment", "--[[ comment\nx = 1\n", 3, 1, "Unclosed multi-line comment"},
+    {"exponent without digits", "x = 1 + 0x1p\n", 1, 9, "Malformed number"}
   ]
 
   @missing_end_errors [

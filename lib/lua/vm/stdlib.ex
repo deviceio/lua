@@ -6,11 +6,11 @@ defmodule Lua.VM.Stdlib do
   scope when the standard library is installed.
   """
 
+  alias Lua.Numeral
   alias Lua.VM.ArgumentError
   alias Lua.VM.AssertionError
   alias Lua.VM.Executor
   alias Lua.VM.Limits
-  alias Lua.VM.Numeric
   alias Lua.VM.ProtectedCall
   alias Lua.VM.RuntimeError
   alias Lua.VM.State
@@ -147,21 +147,10 @@ defmodule Lua.VM.Stdlib do
 
   defp lua_tonumber([], state), do: {[nil], state}
 
-  # tonumber(s, base) per Lua 5.3 §6.1: surrounding whitespace is ignored, an
-  # optional sign is allowed, digits a-z/A-Z map to 10-35 (case-insensitive),
-  # and the result is always an integer (wrapping into the signed 64-bit range
-  # like an integer literal). The whole trimmed string must be valid digits.
   defp parse_in_base(str, base) do
-    {sign, body} =
-      case String.trim(str) do
-        "-" <> rest -> {-1, rest}
-        "+" <> rest -> {1, rest}
-        other -> {1, other}
-      end
-
-    case Integer.parse(body, base) do
-      {n, ""} when body != "" -> Numeric.to_signed_int64(sign * n)
-      _ -> nil
+    case Numeral.parse_integer(String.trim(str), base) do
+      {:ok, integer} -> integer
+      :error -> nil
     end
   end
 

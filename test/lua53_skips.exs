@@ -208,10 +208,10 @@
   "locals.lua" => [],
   "math.lua" => [
     %{
-      lines: 409..422,
+      lines: 412..413,
       category: :unimplemented,
       reason:
-        "very-long hex/decimal numerals (2^1200, 16^301) exceed the BEAM IEEE-754 float range (~2^1023), so tonumber and 2.0^exp overflow where PUC-Lua produces a finite or inf result",
+        "`2.0^1200` and `2.0^2000` overflow the double range; `^` yields the :nan sentinel instead of the 1.0e308 infinity stand-in that tonumber returns for the same magnitude",
       issue: nil
     },
     %{

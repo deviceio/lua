@@ -1547,6 +1547,15 @@ defmodule Lua.Parser do
     )
   end
 
+  defp convert_lexer_error({kind, pos}, _code) when kind in [:invalid_number, :invalid_hex_number] do
+    Error.new(:invalid_syntax, "Malformed number", pos,
+      suggestion: """
+      An exponent (e or p) needs at least one digit after it, and a
+      hexadecimal number at least one hex digit after 0x.
+      """
+    )
+  end
+
   defp convert_lexer_error(other, _code) do
     Error.new(:lexer_error, "Lexer error: #{inspect(other)}", nil)
   end

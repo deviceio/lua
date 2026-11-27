@@ -55,6 +55,12 @@ is in the [`1.0.0-rc.0`](#100-rc0---2026-05-26) entry below.
   past the ceiling in a single allocation. Each raises the same catchable
   `"resulting string too large"` error as `string.rep` and `..`, before the
   result is built (#425).
+- Long numerals convert in linear time. A long integer literal made
+  `Lua.parse_chunk/1` raise `ArithmeticError`, and `tonumber`, string
+  arithmetic and `string.pack` did quadratic bignum work before failing.
+- Malformed hexadecimal numerals (`0x.`, `0x1p`) are a "Malformed number"
+  parse error instead of evaluating to `0.0` or `1.0`, and hexadecimal floats
+  are correctly rounded.
 
 ## [1.0.2] - 2026-07-28
 

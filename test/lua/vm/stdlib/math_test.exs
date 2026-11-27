@@ -365,12 +365,33 @@ defmodule Lua.VM.Stdlib.MathTest do
       assert run!(~s|return tonumber("-1.")|) == [-1.0]
       assert run!(~s|return tonumber("+ 0.01")|) == [nil]
       assert run!(~s|return tonumber(".e1")|) == [nil]
+      assert run!(~s|return tonumber("--1"), tonumber("+-1"), tonumber("--1", 10)|) == [nil, nil, nil]
     end
 
     test "tonumber with a base handles whitespace and signs (math.lua:390)" do
       assert run!(~s|return tonumber("  001010  ", 2)|) == [10]
       assert run!(~s|return tonumber("  -1010  ", 2)|) == [-10]
       assert run!(~s|return tonumber("  +1Z  ", 36)|) == [71]
+    end
+
+    test "an overflowing decimal string of any length converts to the infinity stand-in" do
+      code = ~s"""
+      local s = string.rep("9", 1000000)
+      local n = tonumber(s)
+      return n == math.huge, s + 1 == math.huge, tostring(n) == tostring(math.huge)
+      """
+
+      assert run!(code) == [true, true, true]
+    end
+
+    test "tonumber with a base wraps modulo 2^64 however long the digits" do
+      assert run!(~s|return tonumber(string.rep("z", 1000000), 36)|) === [-1]
+    end
+
+    test "a hexadecimal string of any length wraps modulo 2^64" do
+      code = ~s|return string.format("%d", tonumber("0x" .. string.rep("f", 1000000)))|
+      assert run!(code) == ["-1"]
+      assert run!(~s|return tonumber("0x" .. string.rep("f", 2000000))|) === [-1]
     end
 
     test "hex float strings with leading or trailing dots parse (math.lua:491, 498)" do
