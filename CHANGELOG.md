@@ -49,12 +49,19 @@ is in the [`1.0.0-rc.0`](#100-rc0---2026-05-26) entry below.
 
 ## [Unreleased]
 
+### Added
+- `Lua.new/1` option `:max_decode_nodes` (default 5,000,000) caps the expanded
+  size of a decoded result.
+
 ### Fixed
 - `:max_string_bytes` is now enforced by `table.concat`, `string.gsub`,
   `string.format`, `string.pack` and `os.date`, which previously built results
   past the ceiling in a single allocation. Each raises the same catchable
   `"resulting string too large"` error as `string.rep` and `..`, before the
   result is built (#425).
+- Decoding walks a shared table once instead of once per path, so a few
+  tables referencing each other no longer expand exponentially after the
+  script ends.
 
 ## [1.0.2] - 2026-07-28
 

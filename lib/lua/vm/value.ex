@@ -7,8 +7,10 @@ defmodule Lua.VM.Value do
   the executor and stdlib.
   """
 
+  alias Lua.VM.Limits
   alias Lua.VM.Numeric
   alias Lua.VM.State
+  alias Lua.VM.Table
 
   @doc """
   Returns the Lua type name as a string for the given value.
@@ -333,47 +335,67 @@ defmodule Lua.VM.Value do
   @doc """
   Decodes a Lua VM value into an Elixir-friendly representation.
 
-  Tables are returned as lists of `{key, decoded_value}` tuples.
-  Functions (closures, native) pass through as-is.
+  Tables become lists of `{key, decoded_value}` tuples; functions pass
+  through as-is. Each table is decoded once and reused; a reference back to
+  a table still being decoded stays a `{:tref, id}`.
 
-  Cyclic tables (e.g. the common `T.__index = T` idiom) cannot be
-  represented as acyclic Elixir data, so the walk terminates at the
-  point of recurrence and leaves the table's `{:tref, id}` reference
-  there — mirroring how functions already pass through as opaque
-  references. Shared references that do not form a cycle decode
-  normally.
+  Raises `Lua.RuntimeException` past `state.max_decode_nodes`.
   """
   @spec decode(term(), State.t()) :: term()
-  def decode(value, state), do: decode(value, state, %{})
-
-  defp decode(nil, _state, _ancestors), do: nil
-  defp decode(value, _state, _ancestors) when is_boolean(value), do: value
-  defp decode(value, _state, _ancestors) when is_number(value), do: value
-  defp decode(value, _state, _ancestors) when is_binary(value), do: value
-
-  defp decode({:udref, _} = ref, state, _ancestors) do
-    value = State.get_userdata(state, ref)
-    {:userdata, value}
+  def decode(value, %State{} = state) do
+    [decoded] = decode_list([value], state)
+    decoded
   end
 
-  defp decode({:tref, id} = ref, state, ancestors) do
-    if Map.has_key?(ancestors, id) do
-      ref
-    else
-      table = Map.fetch!(state.tables, id)
-      ancestors = Map.put(ancestors, id, true)
+  @doc """
+  Decodes a list of Lua VM values as one walk, sharing tables and the
+  `max_decode_nodes` budget across them.
+  """
+  @spec decode_list([term()], State.t()) :: [term()]
+  def decode_list(values, %State{} = state) do
+    {decoded, _walk} = Enum.map_reduce(values, {%{}, 0}, &decode_result(&1, state, &2))
+    decoded
+  end
 
-      Enum.map(Lua.VM.Table.to_map(table), fn {k, v} -> {k, decode(v, state, ancestors)} end)
+  defp decode_result(value, state, walk) do
+    decode_value(value, state, reserve_nodes!(walk, 1, state))
+  end
+
+  # A reused table is charged its `subtree_nodes` again, so the budget counts
+  # the expanded size without re-walking it.
+  defp decode_value({:tref, id} = ref, state, {memo, _nodes_used} = walk) do
+    case memo do
+      %{^id => {decoded, subtree_nodes}} -> {decoded, reserve_nodes!(walk, subtree_nodes, state)}
+      %{^id => :in_progress} -> {ref, walk}
+      %{} -> decode_table(ref, state, walk)
     end
   end
 
-  defp decode(value, _state, _ancestors), do: value
+  defp decode_value({:udref, _} = ref, state, walk), do: {{:userdata, State.get_userdata(state, ref)}, walk}
+  defp decode_value(value, _state, walk), do: {value, walk}
 
-  @doc """
-  Decodes a list of Lua VM values.
-  """
-  @spec decode_list([term()], State.t()) :: [term()]
-  def decode_list(values, state) do
-    Enum.map(values, &decode(&1, state))
+  defp decode_table({:tref, id}, state, {memo, nodes_used}) do
+    table = Map.fetch!(state.tables, id)
+    walk = reserve_nodes!({Map.put(memo, id, :in_progress), nodes_used}, Table.entry_count(table), state)
+    {decoded, {memo, nodes_used_after}} = Enum.map_reduce(Table.to_map(table), walk, &decode_entry(&1, state, &2))
+    {decoded, {Map.put(memo, id, {decoded, nodes_used_after - nodes_used}), nodes_used_after}}
+  end
+
+  # Reuse the entry tuple when its value decodes to itself.
+  defp decode_entry({key, {tag, _} = ref}, state, walk) when tag in [:tref, :udref] do
+    {decoded, walk} = decode_value(ref, state, walk)
+    {{key, decoded}, walk}
+  end
+
+  defp decode_entry(entry, _state, walk), do: {entry, walk}
+
+  defp reserve_nodes!({memo, nodes_used}, nodes, %State{max_decode_nodes: max_decode_nodes}) do
+    case Limits.reserve_decode_nodes(nodes_used, nodes, max_decode_nodes) do
+      {:ok, nodes_used} ->
+        {memo, nodes_used}
+
+      :exhausted ->
+        raise Lua.RuntimeException, "decoded value exceeds :max_decode_nodes (#{max_decode_nodes})"
+    end
   end
 end

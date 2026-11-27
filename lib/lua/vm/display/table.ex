@@ -18,7 +18,8 @@ defmodule Lua.VM.Display.Table do
     Truncated to `Inspect.Opts.limit` entries when rendered. When a
     table (transitively) contains itself — e.g. the `T.__index = T`
     OOP idiom — the recurring occurrence carries `:circular` instead
-    of a snapshot, bounding an otherwise infinite walk.
+    of a snapshot, bounding an otherwise infinite walk. Tables past
+    the `:max_decode_nodes` option of `Lua.new/1` carry `:truncated`.
   - `:ref` — the original `{:tref, id}` tuple so callers can
     round-trip the value back into the VM (via `Lua.set!/3`,
     `Lua.encode!/2`, etc.).
@@ -30,7 +31,7 @@ defmodule Lua.VM.Display.Table do
 
   @type t :: %__MODULE__{
           id: non_neg_integer(),
-          peek: list() | map() | :circular,
+          peek: list() | map() | :circular | :truncated,
           ref: tuple()
         }
 
@@ -39,11 +40,13 @@ defmodule Lua.VM.Display.Table do
   defimpl Inspect do
     import Inspect.Algebra
 
-    def inspect(%Table{id: id, peek: :circular}, _opts) do
+    def inspect(%Table{id: id, peek: marker}, _opts) when marker in [:circular, :truncated] do
       concat([
         "#Lua.Table<id: ",
         Integer.to_string(id),
-        ", circular>"
+        ", ",
+        Atom.to_string(marker),
+        ">"
       ])
     end
 

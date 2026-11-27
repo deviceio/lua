@@ -32,6 +32,10 @@ defmodule Lua.VM.Limits do
   # exhaust memory, while staying generous for real data.
   @max_element_count 10_000_000
 
+  # 5 million nodes of roughly 5–10 words each: a few hundred MB for a
+  # consumer walking the expanded result.
+  @max_decode_nodes 5_000_000
+
   @doc "The string-size ceiling, in bytes."
   @spec max_string_bytes() :: pos_integer()
   def max_string_bytes, do: @max_string_bytes
@@ -39,6 +43,21 @@ defmodule Lua.VM.Limits do
   @doc "The element-count ceiling for range-based table operations."
   @spec max_element_count() :: pos_integer()
   def max_element_count, do: @max_element_count
+
+  @doc "The ceiling on the expanded size of a value decoded to Elixir, in nodes."
+  @spec max_decode_nodes() :: pos_integer()
+  def max_decode_nodes, do: @max_decode_nodes
+
+  @doc "Adds `nodes` to `nodes_used`, or returns `:exhausted` past `max_nodes`."
+  @spec reserve_decode_nodes(non_neg_integer(), non_neg_integer(), pos_integer() | :infinity) ::
+          {:ok, non_neg_integer()} | :exhausted
+  # Under `:infinity` the count is left alone so it never grows into a bignum.
+  def reserve_decode_nodes(nodes_used, _nodes, :infinity), do: {:ok, nodes_used}
+
+  def reserve_decode_nodes(nodes_used, nodes, max_nodes) when nodes_used + nodes <= max_nodes,
+    do: {:ok, nodes_used + nodes}
+
+  def reserve_decode_nodes(_nodes_used, _nodes, _max_nodes), do: :exhausted
 
   @doc """
   Asserts that an as-yet-unallocated string of `bytes` bytes is within the

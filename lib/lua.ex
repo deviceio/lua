@@ -12,6 +12,7 @@ defmodule Lua do
   alias Lua.VM.Display
   alias Lua.VM.Executor
   alias Lua.VM.InternalError
+  alias Lua.VM.Limits
   alias Lua.VM.RuntimeError
   alias Lua.VM.State
   alias Lua.VM.Table
@@ -131,6 +132,14 @@ defmodule Lua do
         iex> {[false, message], _lua} = Lua.eval!(lua, "return pcall(function() while true do end end)")
         iex> message =~ "instruction budget exceeded"
         true
+
+  * `:max_decode_nodes` - (default 5,000,000) caps the expanded size of a result decoded to
+    Elixir, counting the value and every table entry as one node. Past it, decoding raises
+    `Lua.RuntimeException`. Accepts a positive integer or `:infinity`.
+
+        iex> lua = Lua.new(max_decode_nodes: 100)
+        iex> Lua.eval!(lua, "local t = {} for i = 1, 20 do t = {t, t} end return t")
+        ** (Lua.RuntimeException) Lua runtime error: decoded value exceeds :max_decode_nodes (100)
   """
   @spec new(keyword()) :: t()
   def new(opts \\ []) do
@@ -140,8 +149,9 @@ defmodule Lua do
         exclude: [],
         debug: false,
         max_call_depth: :infinity,
-        max_string_bytes: Lua.VM.Limits.max_string_bytes(),
-        max_instructions: :infinity
+        max_string_bytes: Limits.max_string_bytes(),
+        max_instructions: :infinity,
+        max_decode_nodes: Limits.max_decode_nodes()
       )
 
     sandboxed = Keyword.fetch!(opts, :sandboxed)
@@ -150,6 +160,7 @@ defmodule Lua do
     max_call_depth = validate_max_call_depth!(Keyword.fetch!(opts, :max_call_depth))
     max_string_bytes = validate_max_string_bytes!(Keyword.fetch!(opts, :max_string_bytes))
     max_instructions = validate_max_instructions!(Keyword.fetch!(opts, :max_instructions))
+    max_decode_nodes = validate_max_decode_nodes!(Keyword.fetch!(opts, :max_decode_nodes))
 
     lua = template(sandboxed, exclude)
 
@@ -160,7 +171,8 @@ defmodule Lua do
           lua.state
           | max_call_depth: max_call_depth,
             max_string_bytes: max_string_bytes,
-            max_instructions: max_instructions
+            max_instructions: max_instructions,
+            max_decode_nodes: max_decode_nodes
         }
     }
   end
@@ -215,6 +227,14 @@ defmodule Lua do
   defp validate_max_instructions!(other) do
     raise ArgumentError,
           ":max_instructions must be a positive integer or :infinity, got: #{inspect(other)}"
+  end
+
+  defp validate_max_decode_nodes!(:infinity), do: :infinity
+  defp validate_max_decode_nodes!(nodes) when is_integer(nodes) and nodes > 0, do: nodes
+
+  defp validate_max_decode_nodes!(other) do
+    raise ArgumentError,
+          ":max_decode_nodes must be a positive integer or :infinity, got: #{inspect(other)}"
   end
 
   @doc """
@@ -1040,16 +1060,12 @@ defmodule Lua do
       iex> Lua.decode!(lua, encoded)
       [{"a", 1}]
 
+  A shared table is decoded once and its term reused. A reference back to a table
+  still being decoded is left as its `{:tref, id}`.
   """
   @spec decode!(t(), term()) :: term()
   def decode!(%__MODULE__{state: state}, value) do
-    value = Display.unwrap(value)
-
-    if not Util.encoded?(value) do
-      raise Lua.RuntimeException, "Failed to decode #{inspect(value)}"
-    end
-
-    Value.decode(value, state)
+    value |> unwrap_encoded!() |> Value.decode(state)
   rescue
     _e in [ArgumentError, KeyError] ->
       reraise Lua.RuntimeException, "Failed to decode #{inspect(value)}", __STACKTRACE__
@@ -1063,10 +1079,25 @@ defmodule Lua do
       iex> {encoded, lua} = Lua.encode_list!(Lua.new(), [1, %{a: 2}, true])
       iex> Lua.decode_list!(lua, encoded)
       [1, [{"a", 2}], true]
+
+  The values share one walk, so `:max_decode_nodes` applies to the whole list.
   """
   @spec decode_list!(t(), [term()]) :: [term()]
-  def decode_list!(%__MODULE__{} = lua, list) when is_list(list) do
-    Enum.map(list, &decode!(lua, &1))
+  def decode_list!(%__MODULE__{state: state}, list) when is_list(list) do
+    list |> Enum.map(&unwrap_encoded!/1) |> Value.decode_list(state)
+  rescue
+    _e in [ArgumentError, KeyError] ->
+      reraise Lua.RuntimeException, "Failed to decode #{inspect(list)}", __STACKTRACE__
+  end
+
+  defp unwrap_encoded!(value) do
+    value = Display.unwrap(value)
+
+    if not Util.encoded?(value) do
+      raise Lua.RuntimeException, "Failed to decode #{inspect(value)}"
+    end
+
+    value
   end
 
   @doc """

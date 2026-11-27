@@ -30,6 +30,8 @@ defmodule Lua.VM.State do
             # cap so an allocation bomb is refused deterministically instead
             # of racing the GC-time heap check.
             max_string_bytes: Limits.max_string_bytes(),
+            # Read only when decoding results to Elixir, never by the executor.
+            max_decode_nodes: Limits.max_decode_nodes(),
             # `max_instructions` is the configured instruction ceiling; `:infinity`
             # (the default) means no limit. The running tally is NOT stored
             # here on the per-opcode hot path — it is threaded as a parameter
@@ -72,6 +74,7 @@ defmodule Lua.VM.State do
           call_depth: non_neg_integer(),
           max_call_depth: pos_integer() | :infinity,
           max_string_bytes: pos_integer() | :infinity,
+          max_decode_nodes: pos_integer() | :infinity,
           max_instructions: pos_integer() | :infinity,
           instruction_count: non_neg_integer(),
           metatables: map(),

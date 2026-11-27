@@ -531,6 +531,15 @@ defmodule Lua.VM.Table do
     end)
   end
 
+  @doc false
+  @spec entry_count(t()) :: non_neg_integer()
+  def entry_count(%__MODULE__{arr: :undefined, data: data}), do: map_size(data)
+  def entry_count(%__MODULE__{arr_n: n, border: n, data: data}), do: n + map_size(data)
+
+  def entry_count(%__MODULE__{arr: arr, arr_n: n, data: data}) do
+    Enum.count(1..n//1, &(:array.get(&1 - 1, arr) != nil)) + map_size(data)
+  end
+
   @doc """
   Returns the next key/value pair in iteration order after `key`.
 

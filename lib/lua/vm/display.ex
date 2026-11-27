@@ -31,7 +31,9 @@ defmodule Lua.VM.Display do
   alias Lua.VM.Display.NativeFunc
   alias Lua.VM.Display.Table, as: DTable
   alias Lua.VM.Display.Userdata
+  alias Lua.VM.Limits
   alias Lua.VM.State
+  alias Lua.VM.Table
 
   @typedoc "Any of the four display structs produced at the eval boundary."
   @type display_struct ::
@@ -49,13 +51,17 @@ defmodule Lua.VM.Display do
   Elixir-friendly shapes (list of tuples and `{:userdata, term}`).
   Closures and native funcs are wrapped in either mode.
 
-  When `decode: false`, all four tag kinds are wrapped; nested values
-  inside tables are also wrapped via `wrap_value/2`.
+  When `decode: false`, all four tag kinds are wrapped and table peeks
+  are walked like `Lua.VM.Value.decode_list/2`: shared tables once, with
+  tables past `state.max_decode_nodes` marked `:truncated`.
   """
   @spec wrap_results([term()], State.t(), boolean()) :: [term()]
-  def wrap_results(values, state, decode?) when is_list(values) do
-    Enum.map(values, &wrap_value(&1, state, decode?))
+  def wrap_results(values, state, false) when is_list(values) do
+    {wrapped, _walk} = Enum.map_reduce(values, {%{}, 0}, &peek_result(&1, state, &2))
+    wrapped
   end
+
+  def wrap_results(values, _state, _decode?) when is_list(values), do: Enum.map(values, &wrap_callable/1)
 
   @doc """
   Returns true when the value is one of the four display structs.
@@ -93,45 +99,39 @@ defmodule Lua.VM.Display do
   see `Lua.VM.Display.Table`.
   """
   @spec wrap_value(term(), State.t(), boolean()) :: term()
-  def wrap_value(value, state, decode?), do: wrap_value(value, state, decode?, %{})
-
-  # decode: true — only wrap closures/native; tables and userdata
-  # have already been decoded and are passed through unchanged.
-  defp wrap_value({:lua_closure, _, _} = ref, _state, _decode?, _ancestors) do
-    wrap_closure(ref)
+  def wrap_value(value, state, decode?) do
+    [wrapped] = wrap_results([value], state, decode?)
+    wrapped
   end
-
-  defp wrap_value({:compiled_closure, _, _} = ref, _state, _decode?, _ancestors) do
-    wrap_closure(ref)
-  end
-
-  defp wrap_value({:native_func, fun} = ref, _state, _decode?, _ancestors) do
-    %NativeFunc{fun: fun, ref: ref}
-  end
-
-  # decode: false — wrap tref/udref too, and recurse into table peek.
-  # `ancestors` holds the tref ids currently being peeked higher up
-  # this walk; revisiting one means the table contains itself.
-  defp wrap_value({:tref, id} = ref, state, false, ancestors) do
-    peek =
-      if Map.has_key?(ancestors, id) do
-        :circular
-      else
-        peek_table(state, id, false, Map.put(ancestors, id, true))
-      end
-
-    %DTable{id: id, peek: peek, ref: ref}
-  end
-
-  defp wrap_value({:udref, id} = ref, state, false, _ancestors) do
-    term = State.get_userdata(state, ref)
-    %Userdata{id: id, term: term, ref: ref}
-  end
-
-  # decode: true catch-all (already-decoded values pass through)
-  defp wrap_value(value, _state, _decode?, _ancestors), do: value
 
   # ---- internal helpers ----
+
+  defp wrap_callable({tag, _, _} = ref) when tag in [:lua_closure, :compiled_closure], do: wrap_closure(ref)
+  defp wrap_callable({:native_func, fun} = ref), do: %NativeFunc{fun: fun, ref: ref}
+  defp wrap_callable(value), do: value
+
+  # Budgeted like `Lua.VM.Value.decode_list/2`, but truncates instead of
+  # raising, so a result whose own node no longer fits is still wrapped.
+  defp peek_result(value, state, {memo, nodes_used} = walk) do
+    case Limits.reserve_decode_nodes(nodes_used, 1, state.max_decode_nodes) do
+      {:ok, nodes_used} -> peek_value(value, state, {memo, nodes_used})
+      :exhausted -> peek_value(value, state, walk)
+    end
+  end
+
+  defp peek_value({:tref, id} = ref, state, {memo, _nodes_used} = walk) do
+    case memo do
+      %{^id => {peeked_table, subtree_nodes}} -> reuse_peek(peeked_table, subtree_nodes, state, walk)
+      %{^id => :in_progress} -> {wrap_table(ref, :circular), walk}
+      %{} -> peek_table(ref, state, walk)
+    end
+  end
+
+  defp peek_value({:udref, id} = ref, state, walk) do
+    {%Userdata{id: id, term: State.get_userdata(state, ref), ref: ref}, walk}
+  end
+
+  defp peek_value(value, _state, walk), do: {wrap_callable(value), walk}
 
   defp wrap_closure({tag, proto, _upvalues} = ref) when tag in [:lua_closure, :compiled_closure] do
     {first_line, _last_line} = proto.lines || {0, 0}
@@ -150,26 +150,44 @@ defmodule Lua.VM.Display do
   # (1..N keys) render as a list; mixed-key tables render as a map.
   # Nested tables/closures are recursively wrapped so `Inspect` does
   # not have to know about live VM state.
-  defp peek_table(state, id, decode?, ancestors) do
-    case Map.fetch(state.tables, id) do
-      {:ok, table} ->
-        data = Lua.VM.Table.to_map(table)
+  defp peek_table({:tref, id} = ref, state, {memo, nodes_used} = walk) do
+    with {:ok, table} <- Map.fetch(state.tables, id),
+         {:ok, nodes_used_with_entries} <-
+           Limits.reserve_decode_nodes(nodes_used, Table.entry_count(table), state.max_decode_nodes) do
+      {peek, {memo, nodes_used_after}} =
+        peek_entries(Table.to_map(table), state, {Map.put(memo, id, :in_progress), nodes_used_with_entries})
 
-        if sequence_like?(data) do
-          Enum.map(
-            1..map_size(data),
-            &wrap_value(Map.fetch!(data, &1), state, decode?, ancestors)
-          )
-        else
-          Map.new(data, fn {k, v} -> {k, wrap_value(v, state, decode?, ancestors)} end)
-        end
-
-      :error ->
-        # Stale or detached reference. Render an empty peek rather
-        # than crashing — the `id` field is enough to identify it.
-        []
+      peeked_table = wrap_table(ref, peek)
+      {peeked_table, {Map.put(memo, id, {peeked_table, nodes_used_after - nodes_used}), nodes_used_after}}
+    else
+      # Stale or detached reference: the `id` is enough to identify it.
+      :error -> {wrap_table(ref, []), walk}
+      :exhausted -> {wrap_table(ref, :truncated), walk}
     end
   end
+
+  defp reuse_peek(peeked_table, subtree_nodes, state, {memo, nodes_used} = walk) do
+    case Limits.reserve_decode_nodes(nodes_used, subtree_nodes, state.max_decode_nodes) do
+      {:ok, nodes_used} -> {peeked_table, {memo, nodes_used}}
+      :exhausted -> {%{peeked_table | peek: :truncated}, walk}
+    end
+  end
+
+  defp peek_entries(entries, state, walk) do
+    if sequence_like?(entries) do
+      Enum.map_reduce(1..map_size(entries), walk, &peek_value(Map.fetch!(entries, &1), state, &2))
+    else
+      {peeked_entries, walk} = Enum.map_reduce(entries, walk, &peek_entry(&1, state, &2))
+      {Map.new(peeked_entries), walk}
+    end
+  end
+
+  defp peek_entry({key, value}, state, walk) do
+    {peeked, walk} = peek_value(value, state, walk)
+    {{key, peeked}, walk}
+  end
+
+  defp wrap_table({:tref, id} = ref, peek), do: %DTable{id: id, peek: peek, ref: ref}
 
   defp sequence_like?(data) when map_size(data) == 0, do: false
 
