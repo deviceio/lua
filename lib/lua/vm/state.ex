@@ -19,8 +19,9 @@ defmodule Lua.VM.State do
   defstruct call_stack: [],
             # Call depth tracked as an O(1) counter that moves in lockstep
             # with `call_stack` — `length(call_stack)` would be O(depth) per
-            # call. `max_call_depth` bounds it; `:infinity` (the default)
-            # means no limit. See `check_call_depth!/1`.
+            # call — plus host calls into Lua, which push no frame (see
+            # `charge_call!/1`). `max_call_depth` bounds it; `:infinity` (the
+            # default) means no limit. See `check_call_depth!/1`.
             call_depth: 0,
             max_call_depth: :infinity,
             # Ceiling for any single string the VM will build (`..` and the
@@ -39,11 +40,9 @@ defmodule Lua.VM.State do
             max_instructions: :infinity,
             # `instruction_count` carries the running tally ACROSS engine boundaries
             # only. The interpreter and dispatcher each thread their tally as
-            # a loop parameter; at an `Executor`↔`Dispatcher` hand-off (where
-            # the struct is already rebuilt to push a call frame) the crossing
-            # engine writes its tally here and the entered engine seeds from
-            # it, so the budget spans a chain that alternates engines instead
-            # of resetting at each boundary. Never written per opcode.
+            # a loop parameter and stamp it here before leaving the loop; the
+            # higher of the two is live (see `stamp_tally/2`). Never written
+            # per opcode.
             instruction_count: 0,
             metatables: %{},
             upvalue_cells: %{},
@@ -132,8 +131,8 @@ defmodule Lua.VM.State do
   this one call. When a finite budget is set it increments the tally and,
   once the new tally reaches `max_instructions`, raises a catchable Lua
   `"instruction budget exceeded"` runtime error. The clauses are ordered so
-  both the `:infinity` and under-budget cases resolve in a single
-  function-head match.
+  both the `:infinity` and under-budget cases resolve in function-head
+  matches.
 
   The raise reuses the same `Lua.VM.RuntimeError` used by `"stack
   overflow"`, carrying the raise-time `state:` so `pcall`/`xpcall` recover
@@ -141,9 +140,15 @@ defmodule Lua.VM.State do
   threaded `instruction_count` is not otherwise in `%State{}`), so `unwind_to/2` can
   carry it forward and a caught budget error stays spent — a protected call
   cannot refund the work it burned.
+
+  When `state.instruction_count` is ahead of the threaded tally, the tick
+  starts from it.
   """
   @spec tick!(t(), non_neg_integer()) :: non_neg_integer()
   def tick!(%__MODULE__{max_instructions: :infinity}, instruction_count), do: instruction_count
+
+  def tick!(%__MODULE__{instruction_count: recorded} = state, instruction_count) when recorded > instruction_count,
+    do: tick!(state, recorded)
 
   def tick!(%__MODULE__{max_instructions: max}, instruction_count) when instruction_count + 1 < max,
     do: instruction_count + 1
@@ -155,6 +160,26 @@ defmodule Lua.VM.State do
       value: "instruction budget exceeded",
       call_stack: call_stack,
       state: %{state | instruction_count: instruction_count}
+  end
+
+  @doc """
+  Stamps a loop-carried tally into the struct unless the struct's count is higher.
+  """
+  @spec stamp_tally(t(), non_neg_integer()) :: t()
+  def stamp_tally(%__MODULE__{instruction_count: recorded} = state, instruction_count) when recorded >= instruction_count,
+    do: state
+
+  def stamp_tally(%__MODULE__{} = state, instruction_count), do: %{state | instruction_count: instruction_count}
+
+  @doc """
+  Charges a host call into a function value as one tick and one `call_depth`
+  level, without a `call_stack` frame. The caller restores `call_depth`.
+  """
+  @spec charge_call!(t()) :: t()
+  def charge_call!(%__MODULE__{call_depth: call_depth, instruction_count: instruction_count} = state) do
+    ticked_state = %{state | instruction_count: tick!(state, instruction_count)}
+    check_call_depth!(ticked_state)
+    %{ticked_state | call_depth: call_depth + 1}
   end
 
   @doc """

@@ -26,6 +26,8 @@ defmodule Lua.VM.Executor do
   alias Lua.VM.TypeError
   alias Lua.VM.Value
 
+  @metamethod_chain_limit 200
+
   # ── Source position bridge for native callbacks ───────────────────────────
   #
   # In-executor raise sites get `line` / `proto.source` threaded as args
@@ -129,13 +131,18 @@ defmodule Lua.VM.Executor do
   def annotate_frame_state(e, _state), do: e
 
   @doc """
-  Calls a Lua function value with the given arguments.
+  Calls a function value, or a value with a `__call` metamethod, from host
+  code (`pcall`, metamethods, stdlib callbacks).
 
-  Used by pcall/xpcall to invoke functions in protected mode.
-  Returns {results, final_state}.
+  The callee is charged as one call against `:max_instructions` and
+  `:max_call_depth`, native functions included. Returns `{results, final_state}`.
   """
   @spec call_function(term(), list(), State.t()) :: {list(), State.t()}
-  def call_function({:lua_closure, callee_proto, callee_upvalues}, args, state) do
+  def call_function(callee, args, state), do: call_resolving_call_metamethod(callee, args, state, 0)
+
+  @doc false
+  @spec call_function_uncharged(term(), list(), State.t()) :: {list(), State.t()}
+  def call_function_uncharged({:lua_closure, callee_proto, callee_upvalues}, args, state) do
     callee_regs =
       Tuple.duplicate(nil, max(callee_proto.max_registers, callee_proto.param_count))
 
@@ -185,12 +192,12 @@ defmodule Lua.VM.Executor do
     end
   end
 
-  def call_function({:compiled_closure, callee_proto, callee_upvalues}, args, state) do
+  def call_function_uncharged({:compiled_closure, callee_proto, callee_upvalues}, args, state) do
     # Compiled callees route through the dispatcher. The dispatcher manages
     # its own register file setup and vararg routing, and isolates open
     # upvalues by threading them as a dispatch-loop parameter seeded empty
     # at this boundary — `Dispatcher.execute/4` mirrors the semantics of
-    # this function for the bytecode-encoded path.
+    # the clause above for the bytecode-encoded path.
     Dispatcher.execute(callee_proto, args, callee_upvalues, state)
   end
 
@@ -199,7 +206,7 @@ defmodule Lua.VM.Executor do
   # protected calls can keep heap effects made before the error without
   # every bad-argument check threading state into its raise. Innermost
   # annotation wins — see `annotate_frame_state/2`.
-  def call_function({:native_func, fun}, args, state) do
+  def call_function_uncharged({:native_func, fun}, args, state) do
     case fun.(args, state) do
       {results, %State{} = new_state} when is_list(results) ->
         {results, new_state}
@@ -211,7 +218,39 @@ defmodule Lua.VM.Executor do
     e -> reraise annotate_frame_state(e, state), __STACKTRACE__
   end
 
-  def call_function(nil, _args, state) do
+  # No release on raise: the trapping pcall restores `call_depth` from its entry state.
+  defp charge_and_call(function, args, %State{max_instructions: :infinity, max_call_depth: :infinity} = state),
+    do: call_function_uncharged(function, args, state)
+
+  defp charge_and_call(function, args, %State{call_depth: depth} = state) do
+    {results, new_state} = call_function_uncharged(function, args, State.charge_call!(state))
+    {results, %{new_state | call_depth: depth}}
+  end
+
+  defp call_resolving_call_metamethod({:lua_closure, _, _} = closure, args, state, _hops),
+    do: charge_and_call(closure, args, state)
+
+  defp call_resolving_call_metamethod({:compiled_closure, _, _} = closure, args, state, _hops),
+    do: charge_and_call(closure, args, state)
+
+  defp call_resolving_call_metamethod({:native_func, _} = native, args, state, _hops),
+    do: charge_and_call(native, args, state)
+
+  defp call_resolving_call_metamethod(_callee, _args, state, hops) when hops >= @metamethod_chain_limit,
+    do: raise_call_chain_too_long(state)
+
+  defp call_resolving_call_metamethod(callee, args, state, hops) do
+    case lookup_metamethod(callee, "__call", state) do
+      nil -> raise_call_error(callee, state)
+      call_metamethod -> call_resolving_call_metamethod(call_metamethod, [callee | args], state, hops + 1)
+    end
+  end
+
+  defp raise_call_chain_too_long(state) do
+    raise RuntimeError, value: "'__call' chain too long; possible loop", state: state
+  end
+
+  defp raise_call_error(nil, state) do
     raise TypeError,
       value: "attempt to call a nil value",
       error_kind: :call_nil,
@@ -219,31 +258,12 @@ defmodule Lua.VM.Executor do
       state: state
   end
 
-  def call_function(other, args, state) do
-    # Check for __call metamethod
-    case get_metatable(other, state) do
-      nil ->
-        raise TypeError,
-          value: "attempt to call a #{Value.type_name(other)} value",
-          error_kind: :call_non_function,
-          value_type: value_type(other),
-          state: state
-
-      {:tref, mt_id} ->
-        mt = Map.fetch!(state.tables, mt_id)
-
-        case Map.get(mt.data, "__call") do
-          nil ->
-            raise TypeError,
-              value: "attempt to call a #{Value.type_name(other)} value",
-              error_kind: :call_non_function,
-              value_type: value_type(other),
-              state: state
-
-          call_mm ->
-            call_function(call_mm, [other | args], state)
-        end
-    end
+  defp raise_call_error(value, state) do
+    raise TypeError,
+      value: "attempt to call a #{Value.type_name(value)} value",
+      error_kind: :call_non_function,
+      value_type: value_type(value),
+      state: state
   end
 
   # ── Bridges for Lua.VM.Dispatcher ──────────────────────────────────────────
@@ -585,8 +605,9 @@ defmodule Lua.VM.Executor do
     prev_pos = :erlang.get(@position_key)
     :erlang.put(@position_key, {line, proto.source})
 
+    # Matches the interpreter: a direct native call from Lua is not charged.
     try do
-      call_function(nf, args, state)
+      call_function_uncharged(nf, args, state)
     after
       case prev_pos do
         :undefined -> :erlang.erase(@position_key)
@@ -596,7 +617,7 @@ defmodule Lua.VM.Executor do
   end
 
   def dispatcher_call_function(other, args, state, proto, name_hint, line) do
-    case get_metatable(other, state) do
+    case lookup_metamethod(other, "__call", state) do
       nil ->
         raise TypeError,
           value: "attempt to call a #{Value.type_name(other)} value" <> format_target_hint(name_hint),
@@ -607,23 +628,8 @@ defmodule Lua.VM.Executor do
           value_type: value_type(other),
           state: state
 
-      {:tref, mt_id} ->
-        mt = Map.fetch!(state.tables, mt_id)
-
-        case Map.get(mt.data, "__call") do
-          nil ->
-            raise TypeError,
-              value: "attempt to call a #{Value.type_name(other)} value" <> format_target_hint(name_hint),
-              source: proto.source,
-              call_stack: state.call_stack,
-              line: line,
-              error_kind: :call_non_function,
-              value_type: value_type(other),
-              state: state
-
-          call_mm ->
-            call_function(call_mm, [other | args], state)
-        end
+      call_mm ->
+        call_resolving_call_metamethod(call_mm, [other | args], state, 1)
     end
   end
 
@@ -672,13 +678,15 @@ defmodule Lua.VM.Executor do
   # ── Goto ───────────────────────────────────────────────────────────────────
   #
   # `Lua.Compiler.GotoResolution` rewrote each `goto` to `{:goto, id}` and
-  # recorded `proto.goto_targets[id] = {depth, target_tail}`. Dropping `depth`
-  # `cont` entries leaves the blocks between here and the target; `target_tail`
-  # is the destination block's instruction suffix after the `::label::`.
+  # recorded `proto.goto_targets[id] = {depth, level, target_tail, direction}`.
+  # Dropping `depth` `cont` entries leaves the blocks between here and the
+  # target; `target_tail` is the destination block's instruction suffix after
+  # the `::label::`.
 
   defp do_execute([{:goto, id} | _rest], regs, upvalues, proto, state, cont, frames, line, instruction_count) do
     case proto.goto_targets do
-      %{^id => {depth, level, target_tail}} ->
+      %{^id => {depth, level, target_tail, direction}} ->
+        {state, instruction_count} = charge_goto(direction, state, instruction_count)
         # Close upvalue cells for locals allocated beyond the target's scope:
         # the blocks the goto leaves (or re-enters, on a backward jump) take
         # their captured locals with them, so the next pass through gets fresh
@@ -743,7 +751,7 @@ defmodule Lua.VM.Executor do
 
       # After while loop body — restart condition
       [{:cps_while_body, test_reg, loop_body, cond_body, rest, outer_cont} | _] ->
-        instruction_count = State.tick!(state, instruction_count)
+        {state, instruction_count} = tick(state, instruction_count)
         loop_exit_cont = [{:loop_exit, rest} | outer_cont]
         cond_check = {:cps_while_test, test_reg, loop_body, cond_body, rest, outer_cont}
 
@@ -783,7 +791,7 @@ defmodule Lua.VM.Executor do
           do_execute(rest, regs, upvalues, proto, state, outer_cont, frames, line, instruction_count)
         else
           # Condition false = repeat body
-          instruction_count = State.tick!(state, instruction_count)
+          {state, instruction_count} = tick(state, instruction_count)
           loop_exit_cont = [{:loop_exit, rest} | outer_cont]
           body_done = {:cps_repeat_body, loop_body, cond_body, test_reg, rest, outer_cont}
 
@@ -810,7 +818,7 @@ defmodule Lua.VM.Executor do
         should_continue = if step > 0, do: new_counter <= limit, else: new_counter >= limit
 
         if should_continue do
-          instruction_count = State.tick!(state, instruction_count)
+          {state, instruction_count} = tick(state, instruction_count)
           regs = put_elem(regs, loop_var, new_counter)
 
           state = close_open_upvalues_at_or_above(state, loop_var)
@@ -828,7 +836,7 @@ defmodule Lua.VM.Executor do
         invariant_state = elem(regs, base + 1)
         control = elem(regs, base + 2)
 
-        state = %{state | instruction_count: instruction_count}
+        state = stamp_tally(state, instruction_count)
         {results, state} = call_value(iter_func, [invariant_state, control], proto, state, line)
         instruction_count = state.instruction_count
         first_result = List.first(results)
@@ -836,7 +844,7 @@ defmodule Lua.VM.Executor do
         if first_result == nil do
           do_execute(rest, regs, upvalues, proto, state, outer_cont, frames, line, instruction_count)
         else
-          instruction_count = State.tick!(state, instruction_count)
+          {state, instruction_count} = tick(state, instruction_count)
           regs = put_elem(regs, base + 2, first_result)
 
           regs =
@@ -1242,7 +1250,7 @@ defmodule Lua.VM.Executor do
     invariant_state = elem(regs, base + 1)
     control = elem(regs, base + 2)
 
-    state = %{state | instruction_count: instruction_count}
+    state = stamp_tally(state, instruction_count)
     {results, state} = call_value(iter_func, [invariant_state, control], proto, state, line)
     instruction_count = state.instruction_count
     first_result = List.first(results)
@@ -1400,7 +1408,7 @@ defmodule Lua.VM.Executor do
         # without going through this branch.
         args = collect_args(regs, base + 1, total_args)
         call_info = {proto.source, line, name_hint}
-        instruction_count = State.tick!(state, instruction_count)
+        {state, instruction_count} = tick(state, instruction_count)
         State.check_call_depth!(state)
         # Carry the tally into the dispatcher so the budget spans the
         # boundary; `Dispatcher.execute/4` seeds from `state.instruction_count` and
@@ -1468,7 +1476,7 @@ defmodule Lua.VM.Executor do
 
         call_info = {proto.source, line, name_hint}
 
-        instruction_count = State.tick!(state, instruction_count)
+        {state, instruction_count} = tick(state, instruction_count)
         State.check_call_depth!(state)
 
         state = %{
@@ -1507,7 +1515,7 @@ defmodule Lua.VM.Executor do
         # Carry the tally into the native callback so a callback that
         # re-enters Lua (pcall, a sort comparator, a gsub function) keeps
         # accumulating against the same budget instead of restarting it.
-        state = %{state | instruction_count: instruction_count}
+        state = stamp_tally(state, instruction_count)
 
         {results, state} =
           try do
@@ -1556,7 +1564,7 @@ defmodule Lua.VM.Executor do
           state: state
 
       other ->
-        case get_metatable(other, state) do
+        case lookup_metamethod(other, "__call", state) do
           nil ->
             raise TypeError,
               value: "attempt to call a #{Value.type_name(other)} value" <> format_target_hint(name_hint),
@@ -1567,41 +1575,26 @@ defmodule Lua.VM.Executor do
               value_type: value_type(other),
               state: state
 
-          {:tref, mt_id} ->
-            mt = Map.fetch!(state.tables, mt_id)
+          call_mm ->
+            args = collect_args(regs, base + 1, total_args)
+            state = stamp_tally(state, instruction_count)
+            {results, state} = call_resolving_call_metamethod(call_mm, [other | args], state, 1)
+            instruction_count = state.instruction_count
 
-            case Map.get(mt.data, "__call") do
-              nil ->
-                raise TypeError,
-                  value: "attempt to call a #{Value.type_name(other)} value" <> format_target_hint(name_hint),
-                  source: proto.source,
-                  call_stack: state.call_stack,
-                  line: line,
-                  error_kind: :call_non_function,
-                  value_type: value_type(other),
-                  state: state
-
-              call_mm ->
-                args = collect_args(regs, base + 1, total_args)
-                state = %{state | instruction_count: instruction_count}
-                {results, state} = call_function(call_mm, [other | args], state)
-                instruction_count = state.instruction_count
-
-                continue_after_call(
-                  results,
-                  regs,
-                  rest,
-                  upvalues,
-                  proto,
-                  state,
-                  cont,
-                  frames,
-                  line,
-                  instruction_count,
-                  base,
-                  result_count
-                )
-            end
+            continue_after_call(
+              results,
+              regs,
+              rest,
+              upvalues,
+              proto,
+              state,
+              cont,
+              frames,
+              line,
+              instruction_count,
+              base,
+              result_count
+            )
         end
     end
   end
@@ -2966,13 +2959,28 @@ defmodule Lua.VM.Executor do
   # ── do_frame_return — restore caller context after a Lua function returns ──
 
   # Stamp the running tally into the state at a top-of-evaluation terminal
-  # so the entry wrapper (`call_function/3`, `call_value/5`, `execute/5`)
+  # so the entry wrapper (`call_function_uncharged/3`, `execute/5`)
   # can carry it back across an engine boundary. Only ever fired when the
   # frame stack is empty — i.e. the interpreter sub-evaluation as a whole
   # is unwinding — never per intra-evaluation return, so the default
   # `:infinity` path pays only at boundaries, exactly like the call-frame
   # bookkeeping it sits beside.
-  defp finish_instructions(state, instruction_count), do: %{state | instruction_count: instruction_count}
+  defp finish_instructions(state, instruction_count), do: stamp_tally(state, instruction_count)
+
+  # Under a finite budget the tick also stamps the tally into the struct, so
+  # work charged behind a bridge is folded back in (see `State.tick!/2`).
+  @compile {:inline, tick: 2, stamp_tally: 2}
+  defp tick(%State{max_instructions: :infinity} = state, instruction_count), do: {state, instruction_count}
+
+  defp tick(state, instruction_count) do
+    instruction_count = State.tick!(state, instruction_count)
+    {%{state | instruction_count: instruction_count}, instruction_count}
+  end
+
+  defp stamp_tally(%State{instruction_count: recorded} = state, instruction_count) when recorded >= instruction_count,
+    do: state
+
+  defp stamp_tally(state, instruction_count), do: State.stamp_tally(state, instruction_count)
 
   defp do_frame_return(results, _callee_regs, state, frame, rest_frames, line, instruction_count) do
     %{
@@ -3174,60 +3182,30 @@ defmodule Lua.VM.Executor do
   defp find_loop_exit([_ | rest_cont]), do: find_loop_exit(rest_cont)
   defp find_loop_exit([]), do: raise(InternalError, value: "break outside loop")
 
+  # ── charge_goto — a backward goto is a loop back-edge ─────────────────────
+
+  defp charge_goto(:backward, state, instruction_count), do: tick(state, instruction_count)
+  defp charge_goto(:forward, state, instruction_count), do: {state, instruction_count}
+
   # ── call_value — invoke a function for generic_for iterator ───────────────
+  #
+  # Charged like `call_resolving_call_metamethod/4`, except that a native
+  # iterator is charged only when reached through `__call`.
 
-  defp call_value({:lua_closure, callee_proto, callee_upvalues}, args, _proto, state, _line) do
-    callee_regs =
-      Tuple.duplicate(nil, max(callee_proto.max_registers, callee_proto.param_count))
+  defp call_value(callable, args, proto, state, line), do: call_value(callable, args, proto, state, line, 0)
 
-    callee_regs =
-      args
-      |> Enum.with_index()
-      |> Enum.reduce(callee_regs, fn {arg, i}, regs ->
-        if i < callee_proto.param_count, do: put_elem(regs, i, arg), else: regs
-      end)
+  defp call_value({:lua_closure, _, _} = closure, args, _proto, state, _line, _hops),
+    do: charge_and_call(closure, args, state)
 
-    callee_proto =
-      if callee_proto.is_vararg do
-        %{callee_proto | varargs: Enum.drop(args, callee_proto.param_count)}
-      else
-        callee_proto
-      end
+  defp call_value({:compiled_closure, _, _} = closure, args, _proto, state, _line, _hops),
+    do: charge_and_call(closure, args, state)
 
-    saved_open_upvalues = state.open_upvalues
-
-    try do
-      state = %{state | open_upvalues: %{}}
-
-      # Seed/recover the cross-boundary budget tally (see `call_function/3`).
-      {results, _callee_regs, state} =
-        do_execute(
-          callee_proto.instructions,
-          callee_regs,
-          callee_upvalues,
-          callee_proto,
-          state,
-          [],
-          [],
-          0,
-          state.instruction_count
-        )
-
-      state = %{state | open_upvalues: saved_open_upvalues}
-      {results, state}
-    rescue
-      # Backstop net — same rationale as the `call_function/3` closure path.
-      e -> reraise annotate_frame_state(e, state), __STACKTRACE__
-    end
+  defp call_value({:native_func, _} = native, args, proto, %State{call_depth: depth} = state, line, hops) when hops > 0 do
+    {results, new_state} = call_value(native, args, proto, State.charge_call!(state), line, 0)
+    {results, %{new_state | call_depth: depth}}
   end
 
-  defp call_value({:compiled_closure, _, _} = closure, args, _proto, state, _line) do
-    # Compiled-closure callees for generic_for iterators reuse the same
-    # dispatcher bridge as `call_function/3`.
-    call_function(closure, args, state)
-  end
-
-  defp call_value({:native_func, fun}, args, proto, state, line) do
+  defp call_value({:native_func, fun}, args, proto, state, line, _hops) do
     # Same source-position bridge as the `:call` opcode's native dispatch.
     # Used by `for` loop iteration when the iterator is native.
     prev_pos = Process.get(@position_key, @unset)
@@ -3253,7 +3231,7 @@ defmodule Lua.VM.Executor do
     end
   end
 
-  defp call_value(nil, _args, proto, state, line) do
+  defp call_value(nil, _args, proto, state, line, _hops) do
     raise TypeError,
       value: "attempt to call a nil value",
       source: proto.source,
@@ -3264,8 +3242,11 @@ defmodule Lua.VM.Executor do
       state: state
   end
 
-  defp call_value(other, args, proto, state, line) do
-    case get_metatable(other, state) do
+  defp call_value(_other, _args, _proto, state, _line, hops) when hops >= @metamethod_chain_limit,
+    do: raise_call_chain_too_long(state)
+
+  defp call_value(other, args, proto, state, line, hops) do
+    case lookup_metamethod(other, "__call", state) do
       nil ->
         raise TypeError,
           value: "attempt to call a #{Value.type_name(other)} value",
@@ -3276,23 +3257,8 @@ defmodule Lua.VM.Executor do
           value_type: value_type(other),
           state: state
 
-      {:tref, mt_id} ->
-        mt = Map.fetch!(state.tables, mt_id)
-
-        case Map.get(mt.data, "__call") do
-          nil ->
-            raise TypeError,
-              value: "attempt to call a #{Value.type_name(other)} value",
-              source: proto.source,
-              call_stack: state.call_stack,
-              line: line,
-              error_kind: :call_non_function,
-              value_type: value_type(other),
-              state: state
-
-          call_mm ->
-            call_value(call_mm, [other | args], proto, state, line)
-        end
+      call_mm ->
+        call_value(call_mm, [other | args], proto, state, line, hops + 1)
     end
   end
 
@@ -3331,8 +3297,6 @@ defmodule Lua.VM.Executor do
   end
 
   # ── Metamethod support ─────────────────────────────────────────────────────
-
-  @metamethod_chain_limit 200
 
   defp get_metatable({:tref, id}, state) do
     table = Map.fetch!(state.tables, id)

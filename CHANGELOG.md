@@ -55,6 +55,13 @@ is in the [`1.0.0-rc.0`](#100-rc0---2026-05-26) entry below.
   past the ceiling in a single allocation. Each raises the same catchable
   `"resulting string too large"` error as `string.rep` and `..`, before the
   result is built (#425).
+- `:max_instructions` now bounds `goto` loops, and keeps the work done in
+  metamethods and before an error trapped by `pcall` (#411).
+- `:max_call_depth` and `:max_instructions` count each re-entry into Lua from
+  native code (`pcall`, `table.sort` comparators, `gsub` callbacks,
+  metamethods, `__call`, `Lua.call_function/3`), so recursion through them
+  raises `"stack overflow"` instead of exhausting the host.
+- A `__call` chain through callable tables is hop-limited like `__index`.
 
 ## [1.0.2] - 2026-07-28
 

@@ -7,7 +7,7 @@ defmodule Lua.Compiler.GotoResolution do
   neither scan backward nor reach an enclosing block at run time. This pass
   resolves every goto up front, rewriting `{:goto, name}` to `{:goto, id}`
   and recording in `proto.goto_targets` an entry
-  `id => {depth, level, target_tail}`:
+  `id => {depth, level, target_tail, direction}`:
 
     * `depth` — the number of `cont` entries the interpreter drops to leave
       the blocks between the goto and its target. A `:test` branch pushes one
@@ -23,6 +23,9 @@ defmodule Lua.Compiler.GotoResolution do
 
     * `target_tail` — the instruction sublist immediately after the matching
       `{:label, name, level}` in its owning block.
+
+    * `direction` — `:backward` when the label precedes the goto, a loop
+      back-edge that ticks `:max_instructions`; otherwise `:forward`.
 
   Label scope (Lua 5.3 §3.3.4): a goto targets a label in its own block or an
   enclosing one, never inside a nested block or a sibling block. `do` blocks
@@ -123,8 +126,8 @@ defmodule Lua.Compiler.GotoResolution do
     {name, block_path} = Map.fetch!(names, id)
 
     case resolve_target(name, block_path, block, idx, ancestors) do
-      {:ok, depth, level, tail} ->
-        Map.put(targets, id, {depth, level, tail})
+      {:ok, depth, level, tail, direction} ->
+        Map.put(targets, id, {depth, level, tail, direction})
 
       # Unresolved gotos are rejected up front by `Lua.Compiler.GotoValidation`
       # as a compile error, so this branch is unreachable in practice; leaving
@@ -161,13 +164,13 @@ defmodule Lua.Compiler.GotoResolution do
   defp resolve_instr(_other, _idx, _block, _ancestors, targets, _names), do: targets
 
   # Search the current block, then each enclosing block, summing `cont`
-  # weights along the way. Returns `{:ok, depth, level, target_tail}` where
-  # `level` is the target label's scope register level (the goto's close
-  # threshold). `goto_path` is the goto's lexical block path; only labels in
-  # the goto's own block or an enclosing one are visible.
+  # weights along the way. Returns `{:ok, depth, level, target_tail,
+  # direction}` where `level` is the target label's scope register level (the
+  # goto's close threshold). `goto_path` is the goto's lexical block path; only
+  # labels in the goto's own block or an enclosing one are visible.
   defp resolve_target(name, goto_path, block, idx, ancestors) do
     case find_label_pos(block, name, goto_path, idx) do
-      {:ok, pos, level} -> {:ok, 0, level, Enum.drop(block, pos + 1)}
+      {:ok, pos, level} -> {:ok, 0, level, Enum.drop(block, pos + 1), direction(pos, idx)}
       :error -> resolve_in_ancestors(name, goto_path, ancestors, 0)
     end
   end
@@ -178,10 +181,13 @@ defmodule Lua.Compiler.GotoResolution do
     depth = depth + weight
 
     case find_label_pos(parent_block, name, goto_path, child_idx) do
-      {:ok, pos, level} -> {:ok, depth, level, Enum.drop(parent_block, pos + 1)}
+      {:ok, pos, level} -> {:ok, depth, level, Enum.drop(parent_block, pos + 1), direction(pos, child_idx)}
       :error -> resolve_in_ancestors(name, goto_path, rest, depth)
     end
   end
+
+  defp direction(label_pos, from) when label_pos < from, do: :backward
+  defp direction(_label_pos, _from), do: :forward
 
   # The visible label nearest after `from`, else the nearest before it. A
   # label is visible when its block path is a prefix of the goto's path (the
